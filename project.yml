@@ -1,0 +1,21 @@
+name: DiaryApp
+options:
+  bundleIdPrefix: com.hixuanye
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  DiaryApp:
+    type: application
+    platform: iOS
+    sources: [DiaryApp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hixuanye.diary
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: 日記
+        INFOPLIST_KEY_NSFaceIDUsageDescription: 使用 Face ID 解鎖你的日記
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
