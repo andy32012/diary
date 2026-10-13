@@ -3,7 +3,7 @@ import SwiftData
 
 /// iPad 版面：左邊日記列表／月曆，右邊寫日記
 struct ContentView: View {
-    enum Mode: String, CaseIterable { case list = "日記", calendar = "月曆" }
+    enum Mode: String, CaseIterable { case list = "日記", calendar = "月曆", weight = "體重" }
 
     @Environment(\.modelContext) private var context
     @Query(sort: \Entry.createdAt, order: .reverse) private var entries: [Entry]
@@ -19,6 +19,8 @@ struct ContentView: View {
             search.isEmpty ? entries : entries.filter { $0.body.localizedCaseInsensitiveContains(search) }
         case .calendar:
             entries.filter { Calendar.current.isDate($0.createdAt, inSameDayAs: day) }
+        case .weight:
+            []
         }
     }
 
@@ -26,7 +28,10 @@ struct ContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            if let selection {
+            if mode == .weight {
+                WeightChartView()
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            } else if let selection {
                 EditorView(entry: selection) { self.selection = nil }
                     .id(selection.id)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -35,6 +40,8 @@ struct ContentView: View {
             }
         }
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: selection?.id)
+        .animation(.spring(response: 0.45, dampingFraction: 0.8), value: mode)
+        .onChange(of: mode) { if mode == .weight { selection = nil } }
         .onChange(of: selection) { old, _ in
             if let old, old.isBlank { context.delete(old) }
         }
@@ -60,7 +67,10 @@ struct ContentView: View {
                             .transition(.push(from: .top).combined(with: .opacity))
                     }
 
-                    if shown.isEmpty {
+                    if mode == .weight {
+                        WeightPanel()
+                            .transition(.push(from: .trailing).combined(with: .opacity))
+                    } else if shown.isEmpty {
                         VStack(spacing: 12) {
                             Mascot(size: mode == .list ? 90 : 60)
                             Text(mode == .list ? "還沒有日記喔\n點右下角的筆寫下今天吧 ✎" : "這天沒有寫日記")
@@ -96,13 +106,16 @@ struct ContentView: View {
                 .animation(.spring(response: 0.4, dampingFraction: 0.75), value: day)
             }
 
-            AddButton(taps: addTaps) {
-                addTaps += 1
-                let entry = Entry(createdAt: mode == .calendar ? day : .now)
-                context.insert(entry)
-                selection = entry
+            if mode != .weight {
+                AddButton(taps: addTaps) {
+                    addTaps += 1
+                    let entry = Entry(createdAt: mode == .calendar ? day : .now)
+                    context.insert(entry)
+                    selection = entry
+                }
+                .padding(24)
+                .transition(.scale.combined(with: .opacity))
             }
-            .padding(24)
         }
         .searchable(text: $search, prompt: "搜尋日記")
         .navigationTitle("我的日記 ✿")

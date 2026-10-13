@@ -14,7 +14,17 @@
   <div class="seg">
     <button class="on" data-mode="list">日記</button>
     <button data-mode="calendar">月曆</button>
+    <button data-mode="weight">體重</button>
     <i class="seg-pill"></i>
+  </div>
+  <div id="weightPanel" class="weight-panel hidden">
+    <div class="w-input">
+      <div class="scale-icon">⚖️</div>
+      <input id="wDate" type="date">
+      <div class="kg"><input id="wKg" type="number" step="0.1" min="20" max="300" placeholder="0.0"><span>kg</span></div>
+      <button id="wSave">記錄 ♥</button>
+    </div>
+    <div id="wList" class="w-list"></div>
   </div>
   <input id="search" class="search" placeholder="🔍 搜尋日記">
   <div id="cal" class="cal hidden">
@@ -30,6 +40,16 @@
     <div class="mascot big"><div class="eyes"><i class="eye"></i><i class="eye"></i></div><div class="cheeks"><i class="cheek"></i><i class="cheek"></i></div><i class="mouth"></i></div>
     <p>選一篇日記，或寫一篇新的吧</p>
   </div>
+  <section id="weightView" class="weight-view hidden">
+    <h2>體重變化 📈</h2>
+    <div class="stats" id="wStats"></div>
+    <div class="chart-card">
+      <div class="range" id="wRange">
+        <button data-days="7">7 天</button><button data-days="30" class="on">30 天</button><button data-days="90">90 天</button><button data-days="0">全部</button>
+      </div>
+      <div id="chart"></div>
+    </div>
+  </section>
   <section id="editor" class="editor hidden">
     <header><span id="edDate"></span><button id="done">♥ 完成</button></header>
     <div class="moods" id="moods"></div>

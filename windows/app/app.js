@@ -94,10 +94,145 @@ document.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
   mode = b.dataset.mode;
   document.querySelectorAll('.seg button').forEach(x => x.classList.toggle('on', x === b));
   document.querySelector('.seg').classList.toggle('right', mode === 'calendar');
+  document.querySelector('.seg').classList.toggle('third', mode === 'weight');
   $('cal').classList.toggle('hidden', mode !== 'calendar');
   $('search').classList.toggle('hidden', mode !== 'list');
-  renderAll();
+  $('cards').classList.toggle('hidden', mode === 'weight');
+  $('add').classList.toggle('hidden', mode === 'weight');
+  $('weightPanel').classList.toggle('hidden', mode !== 'weight');
+  if (mode === 'weight') {
+    select(null);
+    $('emptyDetail').classList.add('hidden');
+    $('weightView').classList.remove('hidden');
+    renderWeights();
+  } else {
+    $('weightView').classList.add('hidden');
+    renderAll();
+  }
 });
+
+/* ---------- 體重 ---------- */
+const WSTORE = 'diary.weights';
+let weights = (() => { try { return JSON.parse(localStorage.getItem(WSTORE)) || []; } catch { return []; } })();
+let rangeDays = 30;
+const saveWeights = () => localStorage.setItem(WSTORE, JSON.stringify(weights));
+const dayKey = d => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; };
+const byDate = () => [...weights].sort((a, b) => a.date.localeCompare(b.date));
+
+$('wDate').value = dayKey(new Date());
+
+$('wSave').onclick = () => {
+  const kg = parseFloat($('wKg').value);
+  if (!(kg >= 20 && kg <= 300) || !$('wDate').value) {
+    $('wKg').parentElement.classList.remove('shake'); void $('wKg').offsetWidth;
+    $('wKg').parentElement.classList.add('shake');
+    return;
+  }
+  const date = $('wDate').value;
+  weights = weights.filter(w => w.date !== date);   // 一天只留一筆
+  weights.push({ date, kg: Math.round(kg * 10) / 10 });
+  saveWeights();
+  $('wKg').value = '';
+  confettiAt($('wSave'));
+  renderWeights();
+};
+$('wKg').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('wSave').click(); });
+
+$('wList').addEventListener('click', ev => {
+  const del = ev.target.closest('.del');
+  if (!del || !confirm('要刪除這筆體重嗎？')) return;
+  weights = weights.filter(w => w.date !== del.dataset.date);
+  saveWeights(); renderWeights();
+});
+
+$('wRange').addEventListener('click', ev => {
+  const b = ev.target.closest('button');
+  if (!b) return;
+  rangeDays = Number(b.dataset.days);
+  $('wRange').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  renderChart();
+});
+
+function renderWeights() {
+  const sorted = byDate();
+  $('wList').innerHTML = sorted.slice().reverse().map((w, i, arr) => {
+    const prev = arr[i + 1];
+    const d = prev ? Math.round((w.kg - prev.kg) * 10) / 10 : null;
+    const diff = d === null ? '' : `<span class="diff ${d < 0 ? 'down' : d > 0 ? 'up' : 'same'}">${d > 0 ? '▲ +' : d < 0 ? '▼ ' : '－ '}${d}</span>`;
+    return `<div class="w-row" style="animation-delay:${i * 0.04}s">
+      <span class="date">${fmtShort(w.date + 'T12:00')}</span><b>${w.kg.toFixed(1)}</b> kg ${diff}
+      <button class="del" data-date="${w.date}" title="刪除">✕</button></div>`;
+  }).join('');
+
+  const fmt = v => v.toFixed(1) + ' kg';
+  const last = sorted.at(-1), first = sorted[0];
+  const kgs = sorted.map(w => w.kg);
+  const change = last ? Math.round((last.kg - first.kg) * 10) / 10 : 0;
+  const stats = sorted.length ? [
+    ['最新', fmt(last.kg)],
+    ['總變化', (change > 0 ? '+' : '') + change.toFixed(1) + ' kg' + (change < 0 ? ' 🎉' : '')],
+    ['最低', fmt(Math.min(...kgs))],
+    ['最高', fmt(Math.max(...kgs))],
+  ] : [['最新', '—'], ['總變化', '—'], ['最低', '—'], ['最高', '—']];
+  $('wStats').innerHTML = stats.map(([k, v], i) => `<div class="stat" style="animation-delay:${i * 0.07}s"><small>${k}</small><div>${v}</div></div>`).join('');
+  renderChart();
+}
+
+function renderChart() {
+  let data = byDate();
+  if (rangeDays) {
+    const from = new Date(); from.setDate(from.getDate() - rangeDays + 1);
+    data = data.filter(w => w.date >= dayKey(from));
+  }
+  const box = $('chart');
+  if (data.length < 2) {
+    box.innerHTML = `<div class="chart-empty">${MASCOT('small')}<p>${data.length ? '再記一筆就能畫出曲線囉！' : '還沒有體重紀錄，從左邊開始記吧 ⚖️'}</p></div>`;
+    return;
+  }
+  const W = box.clientWidth || 600, H = box.clientHeight || 300, P = { l: 44, r: 16, t: 20, b: 28 };
+  const t = data.map(w => new Date(w.date + 'T12:00').getTime());
+  const kgs = data.map(w => w.kg);
+  let lo = Math.min(...kgs), hi = Math.max(...kgs);
+  const pad = Math.max((hi - lo) * 0.25, 0.5); lo -= pad; hi += pad;
+  const x = v => P.l + (v - t[0]) / (t.at(-1) - t[0] || 1) * (W - P.l - P.r);
+  const y = v => P.t + (hi - v) / (hi - lo) * (H - P.t - P.b);
+  const pts = data.map((w, i) => [x(t[i]), y(w.kg)]);
+
+  // 平滑曲線
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], cx = (x0 + x1) / 2;
+    d += ` C${cx},${y0} ${cx},${y1} ${x1},${y1}`;
+  }
+  const area = `${d} L${pts.at(-1)[0]},${H - P.b} L${pts[0][0]},${H - P.b} Z`;
+  const ticks = [0, 1, 2, 3].map(i => lo + (hi - lo) * i / 3);
+
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}">
+    <defs><linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb5c7" stop-opacity=".55"/><stop offset="1" stop-color="#d1c7fa" stop-opacity=".05"/></linearGradient></defs>
+    ${ticks.map(v => `<line class="gridline" x1="${P.l}" x2="${W - P.r}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${P.l - 8}" y="${y(v) + 4}" text-anchor="end">${v.toFixed(1)}</text>`).join('')}
+    <text class="axis" x="${P.l}" y="${H - 6}">${fmtShort(data[0].date + 'T12:00')}</text>
+    <text class="axis" x="${W - P.r}" y="${H - 6}" text-anchor="end">${fmtShort(data.at(-1).date + 'T12:00')}</text>
+    <path class="area" d="${area}"/>
+    <path class="line" d="${d}"/>
+    ${pts.map(([px, py], i) => `<circle class="dot" cx="${px}" cy="${py}" r="6" data-i="${i}" style="animation-delay:${0.3 + i * 1 / pts.length}s"/>`).join('')}
+  </svg><div class="tip" style="opacity:0"></div>`;
+  const line = box.querySelector('.line');
+  line.style.setProperty('--len', line.getTotalLength());
+
+  const tip = box.querySelector('.tip');
+  box.querySelectorAll('.dot').forEach(c => {
+    c.onmouseenter = () => {
+      const w = data[c.dataset.i];
+      tip.textContent = `${fmtShort(w.date + 'T12:00')}　${w.kg.toFixed(1)} kg`;
+      tip.style.left = c.getAttribute('cx') / W * 100 + '%';
+      tip.style.top = c.getAttribute('cy') / H * 100 + '%';
+      tip.style.opacity = 1;
+    };
+    c.onmouseleave = () => { tip.style.opacity = 0; };
+  });
+}
+window.addEventListener('resize', () => { if (mode === 'weight') renderChart(); });
 
 /* ---------- 右側編輯 ---------- */
 $('moods').innerHTML = EMOJI.map((e, i) =>
@@ -160,9 +295,11 @@ function addEntry() {
 }
 $('add').onclick = addEntry;
 
-function confetti() {
-  const r = $('done').getBoundingClientRect();
-  const cx = r.left + r.width / 2, cy = r.top + r.height / 2 + 120;
+function confetti() { confettiAt($('done'), 120); }
+
+function confettiAt(el, dy = 0) {
+  const r = el.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2 + dy;
   const syms = ['💗', '⭐', '✨', '💖', '🌟', '🎀'];
   for (let i = 0; i < 18; i++) {
     const p = document.createElement('div');

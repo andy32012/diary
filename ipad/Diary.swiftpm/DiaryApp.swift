@@ -21,7 +21,7 @@ struct DiaryApp: App {
                 withAnimation(.easeInOut(duration: 0.5)) { showSplash = false }
             }
         }
-        .modelContainer(for: Entry.self)
+        .modelContainer(for: [Entry.self, WeightRecord.self])
     }
 }
 
