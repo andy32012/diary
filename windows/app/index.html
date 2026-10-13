@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日記</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="bubbles"></div>
+
+<aside class="sidebar">
+  <h1>我的日記 ✿</h1>
+  <div class="seg">
+    <button class="on" data-mode="list">日記</button>
+    <button data-mode="calendar">月曆</button>
+    <i class="seg-pill"></i>
+  </div>
+  <input id="search" class="search" placeholder="🔍 搜尋日記">
+  <div id="cal" class="cal hidden">
+    <div class="calhead"><button id="prev">‹</button><span id="month"></span><button id="next">›</button></div>
+    <div class="grid" id="grid"></div>
+  </div>
+  <div id="cards" class="cards"></div>
+  <button class="add" id="add" title="寫新日記 (Ctrl+N)">✎</button>
+</aside>
+
+<main class="detail">
+  <div id="emptyDetail" class="empty-detail">
+    <div class="mascot big"><div class="eyes"><i class="eye"></i><i class="eye"></i></div><div class="cheeks"><i class="cheek"></i><i class="cheek"></i></div><i class="mouth"></i></div>
+    <p>選一篇日記，或寫一篇新的吧</p>
+  </div>
+  <section id="editor" class="editor hidden">
+    <header><span id="edDate"></span><button id="done">♥ 完成</button></header>
+    <div class="moods" id="moods"></div>
+    <textarea id="body" placeholder="今天發生了什麼事呢？"></textarea>
+    <div class="count" id="count">0 字</div>
+  </section>
+</main>
+
+<div class="splash" id="splash">
+  <div class="mascot big"><div class="eyes"><i class="eye"></i><i class="eye"></i></div><div class="cheeks"><i class="cheek"></i><i class="cheek"></i></div><i class="mouth"></i></div>
+  <h2>今天過得好嗎？</h2>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

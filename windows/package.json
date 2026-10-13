@@ -1,0 +1,33 @@
+{
+  "name": "diary",
+  "productName": "日記",
+  "version": "1.0.0",
+  "description": "可愛的日記 App",
+  "main": "main.js",
+  "author": "hixuanye",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.hixuanye.diary",
+    "productName": "日記",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "app/**"
+    ],
+    "win": {
+      "target": "portable"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  }
+}
