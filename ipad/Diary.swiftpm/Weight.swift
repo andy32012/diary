@@ -253,7 +253,7 @@ struct WeightChartView: View {
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(.white.opacity(0.85)))
             }
         }
-        .animation(.snappy, value: records.map(\.kg))
+        .animation(.snappy, value: records.compactMap(\.weightValue))
     }
 
     private var chart: some View {
@@ -274,7 +274,7 @@ struct WeightChartView: View {
                 .lineStyle(StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round))
                 .interpolationMethod(.catmullRom)
             PointMark(x: .value("日期", record.date, unit: .day),
-                      y: .value("體重", drawn ? record.kg : low))
+                      y: .value("體重", drawn ? (record.weightValue ?? low) : low))
                 .symbol {
                     Circle().fill(.white).overlay(Circle().stroke(Theme.pinkDeep, lineWidth: 3))
                         .frame(width: picked?.id == record.id ? 18 : 12)
