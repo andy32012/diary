@@ -17,6 +17,7 @@
     },
     "files": [
       "main.js",
+      "preload.js",
       "app/**"
     ],
     "win": {
@@ -24,10 +25,10 @@
     }
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "electron": "^44.7.1",
     "electron-builder": "^25.1.8"
   },
   "allowScripts": {
-    "electron@33.4.11": true
+    "electron@44.7.2": true
   }
 }
