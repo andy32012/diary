@@ -23,14 +23,20 @@
     ],
     "win": {
       "target": "portable"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
     }
   },
   "devDependencies": {
     "electron": "^44.7.1",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^26.15.3"
   },
   "allowScripts": {
     "electron@44.7.2": true
   }
 }
-

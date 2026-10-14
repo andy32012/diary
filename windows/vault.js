@@ -3,6 +3,7 @@ const { randomBytes, scrypt, createCipheriv, createDecipheriv } = require('node:
 const { promisify } = require('node:util');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const policy = require('./app/password-policy');
 const derive = promisify(scrypt);
 const MAGIC = Buffer.from('DIARY-VAULT-V2\n');
 const LEGACY = Buffer.from('DIARY-VAULT-V1\n');
@@ -21,7 +22,9 @@ function validate(text) {
   return text;
 }
 async function keyFrom(password, salt, creating = false) {
-  if (typeof password !== 'string' || Buffer.byteLength(password) > 1024 || (creating && [...password].length < 12) || !password.length) throw Error('請使用至少 12 個字元的長密碼，最多 1024 UTF-8 位元組。');
+  if (typeof password !== 'string' || Buffer.byteLength(password) > 1024 || !password.length) throw Error('請使用至少 12 個字元的長密碼，最多 1024 UTF-8 位元組。');
+  const weak = creating && policy.problem(password);
+  if (weak) throw Error(weak);
   const bytes = Buffer.from(password, 'utf8');
   try { return await derive(bytes, salt, 32, { N: 131072, r: 8, p: 1, maxmem: 256 * 1024 * 1024 }); }
   finally { bytes.fill(0); }

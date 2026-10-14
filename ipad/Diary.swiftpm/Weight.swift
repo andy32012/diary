@@ -7,24 +7,32 @@ final class WeightRecord {
     var date: Date      // 一天一筆，存當天 00:00
     var kg: Double
     var encryptedKg: Data?
+    var uid: UUID?
+    var sealedKg: Data?
 
     init(date: Date, kg: Double) {
         self.date = Calendar.current.startOfDay(for: date)
         self.kg = kg
         self.encryptedKg = nil
+        self.uid = UUID()
+        self.sealedKg = nil
     }
 
+    var needsMigration: Bool { uid == nil || sealedKg == nil }
+
     var weightValue: Double? {
-        guard let encryptedKg else { return kg }
-        guard let text = try? DiaryCrypto.decrypt(encryptedKg),
+        guard let uid, let sealedKg,
+              let text = try? DiaryCrypto.open(sealedKg, field: .weightKg, id: uid, date: date),
               let value = Double(text),
               value.isFinite else { return nil }
         return value
     }
 
     func encryptWeight(_ value: Double) throws {
-        encryptedKg = try DiaryCrypto.encrypt(String(value))
+        guard let uid else { throw DiaryCryptoError.invalidCiphertext }
+        sealedKg = try DiaryCrypto.seal(String(value), field: .weightKg, id: uid, date: date)
         kg = 0
+        encryptedKg = nil
     }
 }
 

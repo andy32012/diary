@@ -8,6 +8,7 @@ struct EditorView: View {
     @State private var selectedMood = 3
     @State private var bodyEncryptionFailed = false
     @State private var moodEncryptionFailed = false
+    @State private var unreadable = false
     @State private var showEncryptionError = false
     @State private var encryptionError = ""
     @FocusState private var focused: Bool
@@ -20,6 +21,7 @@ struct EditorView: View {
 
             VStack(alignment: .leading, spacing: 20) {
                 MoodPicker(mood: $selectedMood)
+                    .disabled(unreadable)
                     .onChange(of: selectedMood) { _, value in
                         do {
                             try entry.encryptMood(value)
@@ -31,6 +33,7 @@ struct EditorView: View {
                     }
 
                 TextEditor(text: $draft)
+                    .disabled(unreadable)
                     .font(.system(.title3, design: .rounded))
                     .scrollContentBackground(.hidden)
                     .focused($focused)
@@ -90,8 +93,9 @@ struct EditorView: View {
         .sensoryFeedback(.selection, trigger: selectedMood)
         .onAppear {
             guard let body = entry.bodyText, let mood = entry.moodValue else {
-                encryptionError = "無法解密這篇日記。原始資料仍保留，請重新解鎖，或檢查備份中的加密金鑰檔。"
+                encryptionError = "無法解密或驗證這篇日記，已停止編輯。原始資料仍保留，請重新解鎖，或檢查備份中的加密金鑰檔。"
                 showEncryptionError = true
+                unreadable = true
                 bodyEncryptionFailed = true
                 moodEncryptionFailed = true
                 return

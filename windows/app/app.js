@@ -24,6 +24,8 @@ function readLegacyArray(key) {
   if (!Array.isArray(value)) throw new Error('舊日記資料格式錯誤。');
   return value;
 }
+// ipcRenderer.invoke prefixes main-process errors; show only the message written for the user.
+const reason = error => String(error?.message || '請稍後再試。').replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
 function clearPrivateView() {
   storageReady = false;
   viewEpoch++;
@@ -33,13 +35,14 @@ function clearPrivateView() {
   $('editor').classList.add('hidden');
   $('secureGate').classList.remove('hidden');
   $('lockDiary').classList.add('hidden');
+  $('notice').classList.add('hidden'); $('notice').textContent = '';
   document.querySelector('main').inert = true;
   document.querySelector('aside').inert = true;
   document.querySelector('.detail').style.background = '';
 }
 function showStorageFailure(error) {
   clearPrivateView();
-  $('secureGateMessage').textContent = `無法安全開啟或儲存：${error?.message || '請稍後再試。'}`;
+  $('secureGateMessage').textContent = `無法安全開啟或儲存：${reason(error)}`;
   void window.diaryCrypto.lock();
 }
 function save() {
@@ -56,16 +59,17 @@ async function refreshGate() {
   $('vaultSubmit').textContent = setupRequired ? '建立密碼並加密' : '解鎖';
   $('vaultPassword').autocomplete = setupRequired ? 'new-password' : 'current-password';
   $('secureGateMessage').textContent = setupRequired
-    ? '設定至少 12 個字元的長密碼。舊日記將遷移至密碼加密。'
+    ? '設定至少 12 個字元、不容易被猜到的長密碼（例如幾個不相關的詞組成一句話）。舊日記將遷移至密碼加密。'
     : '日記已鎖定，請輸入獨立日記密碼。';
 }
 $('vaultForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (unlocking) return;
   let password = $('vaultPassword').value;
-  if (setupRequired && ([...password].length < 12 || password !== $('vaultConfirm').value)) {
-    $('secureGateMessage').textContent = '請輸入至少 12 個字元，並確認兩次密碼相同。';
-    return;
+  if (setupRequired) {
+    // Checked here too so a weak choice does not trigger the main process retry delay.
+    const problem = window.passwordPolicy.problem(password) || (password !== $('vaultConfirm').value && '兩次輸入的密碼不同，請再確認一次。');
+    if (problem) { $('secureGateMessage').textContent = problem; return; }
   }
   const attempt = viewEpoch;
   unlocking = true; $('vaultSubmit').disabled = true;
@@ -73,7 +77,7 @@ $('vaultForm').addEventListener('submit', async event => {
   $('vaultPassword').value = ''; $('vaultConfirm').value = '';
   try {
     const legacy = legacyLocal ? JSON.stringify({ version: 1, entries: readLegacyArray(STORE), weights: readLegacyArray(WSTORE) }) : null;
-    const text = await window.diaryCrypto.unlock(password, legacy);
+    const { text, notice } = await window.diaryCrypto.unlock(password, legacy);
     if (attempt !== viewEpoch) { await window.diaryCrypto.lock(); return; }
     const data = JSON.parse(text);
     entries = data.entries; weights = data.weights;
@@ -82,13 +86,14 @@ $('vaultForm').addEventListener('submit', async event => {
     renderAll(); if (mode === 'weight') renderWeights();
     $('secureGate').classList.add('hidden');
     $('lockDiary').classList.remove('hidden');
+    if (notice) { $('notice').textContent = notice; $('notice').classList.remove('hidden'); }
     document.querySelector('main').inert = false;
     document.querySelector('aside').inert = false;
   } catch (error) {
     if (attempt === viewEpoch) {
       clearPrivateView();
       await window.diaryCrypto.lock();
-      $('secureGateMessage').textContent = error.message;
+      $('secureGateMessage').textContent = reason(error);
     }
   } finally {
     password = null; unlocking = false; $('vaultSubmit').disabled = false;
@@ -96,9 +101,10 @@ $('vaultForm').addEventListener('submit', async event => {
 });
 window.diaryCrypto.onLocked(() => {
   clearPrivateView();
-  refreshGate().catch(error => { $('secureGateMessage').textContent = error.message; });
+  refreshGate().catch(error => { $('secureGateMessage').textContent = reason(error); });
 });
 $('lockDiary').onclick = () => { clearPrivateView(); void window.diaryCrypto.lock(); };
+$('notice').onclick = () => { $('notice').classList.add('hidden'); };
 let lastActivity = 0;
 for (const type of ['pointerdown', 'click', 'keydown', 'input']) {
   document.addEventListener(type, event => {
@@ -443,6 +449,6 @@ for (let i = 0; i < 14; i++) {
   });
   $('bubbles').appendChild(b);
 }
-refreshGate().catch(error => { $('secureGateMessage').textContent = error.message; });
+refreshGate().catch(error => { $('secureGateMessage').textContent = reason(error); });
 setTimeout(() => $('splash').classList.add('out'), 1600);
 

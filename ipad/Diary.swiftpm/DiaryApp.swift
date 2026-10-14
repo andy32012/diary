@@ -5,6 +5,7 @@ import Combine
 
 @main
 struct DiaryApp: App {
+    @UIApplicationDelegateAdaptor(DiaryAppDelegate.self) private var appDelegate
     @State private var showSplash = true
 
     var body: some Scene {
@@ -27,7 +28,14 @@ struct DiaryApp: App {
     }
 }
 
-/// The content view exists only during an authenticated, foreground session.
+/// Third-party keyboards see everything typed and, with full access, can send it elsewhere.
+final class DiaryAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, shouldAllowExtensionPointIdentifier extensionPointIdentifier: UIApplication.ExtensionPointIdentifier) -> Bool {
+        extensionPointIdentifier != .keyboard
+    }
+}
+
+/// The content view exists only during an authenticated, foreground, unrecorded session.
 private struct EncryptionGate: View {
     @Environment(\.modelContext) private var context
     @Environment(\.scenePhase) private var scenePhase
@@ -39,15 +47,31 @@ private struct EncryptionGate: View {
     @State private var confirmation = ""
     @State private var busy = false
     @State private var errorMessage: String?
+    @State private var notice: String?
+    @State private var captured = false
     @State private var lastActivity = Date.now
     @State private var generation = 0
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
-            if isReady && scenePhase == .active {
+            if isReady && scenePhase == .active && captured {
+                CaptureCover()
+            } else if isReady && scenePhase == .active {
                 VStack(spacing: 0) {
                     HStack {
+                        if let notice {
+                            Button { self.notice = nil } label: {
+                                Text(notice)
+                                    .font(.system(.callout, design: .rounded))
+                                    .foregroundStyle(Theme.ink)
+                                    .multilineTextAlignment(.leading)
+                                    .padding(.horizontal, 14).padding(.vertical, 8)
+                                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.peach))
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.leading, 12)
+                        }
                         Spacer()
                         Button("鎖定日記", systemImage: "lock.fill") { lock() }
                             .padding(12)
@@ -66,7 +90,7 @@ private struct EncryptionGate: View {
                         if setupRequired {
                             SecureField("再次輸入密碼", text: $confirmation)
                                 .textContentType(.newPassword)
-                            Text("至少 12 個字元，建議使用密碼管理器產生長密碼。舊日記會在解鎖後安全遷移。")
+                            Text("至少 12 個字元且不容易被猜到，例如用幾個不相關的詞組成一句好記的話。舊日記會在解鎖後安全遷移。")
                         }
                         Text("沒有密碼復原或重設功能。忘記密碼將無法讀取日記；備份時需同時保留資料庫與加密金鑰檔。")
                         Text("切到背景或閒置 5 分鐘會自動鎖定。")
@@ -83,13 +107,19 @@ private struct EncryptionGate: View {
                 .background(Theme.background.ignoresSafeArea())
             }
         }
-        .task { refreshSetup() }
+        .task {
+            refreshSetup()
+            refreshCaptured()
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { lock() }
-            else { refreshSetup() }
+            else { refreshSetup(); refreshCaptured() }
         }
         .onReceive(clock) { now in
             if isReady && now.timeIntervalSince(lastActivity) >= 300 { lock() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
+            refreshCaptured()
         }
         .onReceive(NotificationCenter.default.publisher(for: UITextView.textDidChangeNotification)) { _ in
             if isReady { lastActivity = .now }
@@ -103,6 +133,10 @@ private struct EncryptionGate: View {
         do { setupRequired = try DiaryCrypto.needsSetup() }
         catch { errorMessage = error.localizedDescription }
     }
+    /// Screen recording, AirPlay and mirroring hide the diary until capture stops.
+    private func refreshCaptured() {
+        captured = UIApplication.shared.connectedScenes.contains { ($0 as? UIWindowScene)?.screen.isCaptured == true }
+    }
     private func lock() {
         generation += 1
         // Values are already encrypted by the editors. Flush them before releasing the key.
@@ -111,30 +145,36 @@ private struct EncryptionGate: View {
             catch { errorMessage = "儲存失敗：\(error.localizedDescription)；請重新解鎖後重試。" }
         }
         isReady = false
+        notice = nil
         password = ""; confirmation = ""
         DiaryCrypto.lock()
     }
     private func unlock() {
         guard !busy, scenePhase == .active else { return }
-        if setupRequired && (password.count < 12 || password != confirmation) {
-            errorMessage = "請使用至少 12 個字元，並確認兩次密碼相同。"
-            return
+        if setupRequired {
+            // Checked before the expensive key derivation and without counting as a failed attempt.
+            if let problem = PasswordPolicy.problem(password) { errorMessage = problem; return }
+            if password != confirmation { errorMessage = "兩次輸入的密碼不同，請再確認一次。"; return }
         }
         let attempt = generation
         let secret = password
-        let hasEncryptedRecords = entries.contains { $0.encryptedBody != nil || $0.encryptedMood != nil }
+        let hasLegacyRecords = entries.contains { $0.encryptedBody != nil || $0.encryptedMood != nil }
             || weights.contains { $0.encryptedKg != nil }
+        let hasSealedRecords = entries.contains { $0.sealedBody != nil || $0.sealedMood != nil }
+            || weights.contains { $0.sealedKg != nil }
         password = ""; confirmation = ""; busy = true; errorMessage = nil
         Task {
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try DiaryCrypto.unlock(password: secret, hasEncryptedRecords: hasEncryptedRecords)
+                    try DiaryCrypto.unlock(password: secret, hasLegacyRecords: hasLegacyRecords, hasSealedRecords: hasSealedRecords)
                 }.value
                 guard attempt == generation, scenePhase == .active else {
                     DiaryCrypto.lock(); busy = false; refreshSetup(); return
                 }
-                try migrate()
-                try DiaryCrypto.finishMigration()
+                let skipped = try migrate()
+                // Keep the old key and pending phase while any older record could not be read.
+                if skipped == 0 { try DiaryCrypto.finishMigration() }
+                notice = skipped == 0 ? nil : "有 \(skipped) 筆記錄無法解密或驗證，已保留原始資料並顯示為「無法解密」。確認不需要後可以刪除。"
                 lastActivity = .now
                 isReady = true
             } catch {
@@ -146,30 +186,91 @@ private struct EncryptionGate: View {
             refreshSetup()
         }
     }
-    private func migrate() throws {
-        // Stage and validate everything before modifying SwiftData objects.
-        let stagedEntries = try entries.map { entry -> (Entry, Data, Data) in
-            let body = try entry.encryptedBody.map { try DiaryCrypto.decrypt($0) } ?? entry.body
-            let moodText = try entry.encryptedMood.map { try DiaryCrypto.decrypt($0) } ?? String(entry.mood)
-            guard let mood = Int(moodText), (1...5).contains(mood) else { throw DiaryCryptoError.invalidCiphertext }
-            return (entry, try DiaryCrypto.encrypt(body), try DiaryCrypto.encrypt(String(mood)))
+    /// Seals only records that are not yet bound to their id, field and date, and returns how many could not be read.
+    /// One damaged record never blocks unlocking; after the migration completes, unbound records are rejected.
+    private func migrate() throws -> Int {
+        let pendingEntries = entries.filter(\.needsMigration)
+        let pendingWeights = weights.filter(\.needsMigration)
+        guard try DiaryCrypto.isMigrationPending() else { return pendingEntries.count + pendingWeights.count }
+        var skipped = 0
+        var stagedEntries: [(Entry, UUID, Data, Data)] = []
+        for entry in pendingEntries {
+            do {
+                let id = entry.uid ?? UUID()
+                let body = try olderValue(entry.sealedBody, .entryBody, entry.uid, entry.createdAt, entry.encryptedBody) ?? entry.body
+                let moodText = try olderValue(entry.sealedMood, .entryMood, entry.uid, entry.createdAt, entry.encryptedMood) ?? String(entry.mood)
+                guard let mood = Int(moodText), (1...5).contains(mood) else { throw DiaryCryptoError.invalidCiphertext }
+                let sealedBody = try DiaryCrypto.seal(body, field: .entryBody, id: id, date: entry.createdAt)
+                let sealedMood = try DiaryCrypto.seal(String(mood), field: .entryMood, id: id, date: entry.createdAt)
+                // Verify before the older columns are cleared.
+                guard try DiaryCrypto.open(sealedBody, field: .entryBody, id: id, date: entry.createdAt) == body,
+                      try DiaryCrypto.open(sealedMood, field: .entryMood, id: id, date: entry.createdAt) == String(mood)
+                else { throw DiaryCryptoError.invalidCiphertext }
+                stagedEntries.append((entry, id, sealedBody, sealedMood))
+            } catch DiaryCryptoError.locked {
+                throw DiaryCryptoError.locked
+            } catch {
+                skipped += 1
+            }
         }
-        let stagedWeights = try weights.map { record -> (WeightRecord, Data) in
-            let text = try record.encryptedKg.map { try DiaryCrypto.decrypt($0) } ?? String(record.kg)
-            guard let value = Double(text), value.isFinite, (20...300).contains(value) else { throw DiaryCryptoError.invalidCiphertext }
-            return (record, try DiaryCrypto.encrypt(String(value)))
+        var stagedWeights: [(WeightRecord, UUID, Data)] = []
+        for record in pendingWeights {
+            do {
+                let id = record.uid ?? UUID()
+                let text = try olderValue(record.sealedKg, .weightKg, record.uid, record.date, record.encryptedKg) ?? String(record.kg)
+                guard let value = Double(text), value.isFinite, (20...300).contains(value) else { throw DiaryCryptoError.invalidCiphertext }
+                let sealed = try DiaryCrypto.seal(String(value), field: .weightKg, id: id, date: record.date)
+                guard try DiaryCrypto.open(sealed, field: .weightKg, id: id, date: record.date) == String(value) else { throw DiaryCryptoError.invalidCiphertext }
+                stagedWeights.append((record, id, sealed))
+            } catch DiaryCryptoError.locked {
+                throw DiaryCryptoError.locked
+            } catch {
+                skipped += 1
+            }
         }
+        guard !stagedEntries.isEmpty || !stagedWeights.isEmpty else { return skipped }
         let autosave = context.autosaveEnabled
         context.autosaveEnabled = false
         defer { context.autosaveEnabled = autosave }
         do {
-            for (entry, body, mood) in stagedEntries {
-                entry.encryptedBody = body; entry.encryptedMood = mood
-                entry.body = ""; entry.mood = 0
+            for (entry, id, body, mood) in stagedEntries {
+                entry.uid = id; entry.sealedBody = body; entry.sealedMood = mood
+                entry.body = ""; entry.mood = 0; entry.encryptedBody = nil; entry.encryptedMood = nil
             }
-            for (record, kg) in stagedWeights { record.encryptedKg = kg; record.kg = 0 }
+            for (record, id, kg) in stagedWeights {
+                record.uid = id; record.sealedKg = kg
+                record.kg = 0; record.encryptedKg = nil
+            }
             try context.save()
         } catch { context.rollback(); throw error }
+        return skipped
+    }
+    /// An existing sealed value, else unbound version 1 ciphertext; nil means the plaintext column holds the value.
+    private func olderValue(_ sealed: Data?, _ field: DiaryCrypto.Field, _ uid: UUID?, _ date: Date, _ encrypted: Data?) throws -> String? {
+        if let sealed {
+            guard let uid else { throw DiaryCryptoError.invalidCiphertext }
+            return try DiaryCrypto.open(sealed, field: field, id: uid, date: date)
+        }
+        return try encrypted.map { try DiaryCrypto.openLegacy($0) }
+    }
+}
+
+private struct CaptureCover: View {
+    var body: some View {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            VStack(spacing: 16) {
+                Mascot(size: 90)
+                Text("偵測到螢幕錄影或畫面鏡像，日記內容已隱藏。")
+                    .font(.system(.headline, design: .rounded))
+                Text("停止錄影或鏡像後就會恢復。")
+                    .font(.system(.subheadline, design: .rounded))
+                    .foregroundStyle(Theme.ink.opacity(0.7))
+            }
+            .foregroundStyle(Theme.ink)
+            .multilineTextAlignment(.center)
+            .padding(32)
+        }
     }
 }
 
