@@ -1,16 +1,20 @@
 const { app, BrowserWindow, Menu, ipcMain, safeStorage } = require('electron');
+const fs = require('fs/promises');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const { randomUUID } = require('crypto');
 
 let mainWindow = null;
 const indexPath = path.join(__dirname, 'app', 'index.html');
 const trustedPage = pathToFileURL(indexPath).href;
+const vaultMagic = Buffer.from('DIARY-VAULT-V1\n');
+const maxVaultBytes = 32 * 1024 * 1024;
 
 function assertTrustedSender(event) {
   if (!mainWindow ||
       event.sender !== mainWindow.webContents ||
       event.senderFrame !== mainWindow.webContents.mainFrame) {
-    throw new Error('Untrusted renderer requested diary encryption.');
+    throw new Error('Untrusted renderer requested diary storage.');
   }
 }
 
@@ -24,32 +28,59 @@ async function assertSecureStorageAvailable() {
   }
 }
 
-ipcMain.handle('diary:encrypt', async (event, plaintext) => {
-  assertTrustedSender(event);
-  if (typeof plaintext !== 'string') throw new TypeError('Plaintext must be a string.');
-  await assertSecureStorageAvailable();
+function getVaultPath() {
+  return path.join(app.getPath('userData'), 'diary-vault.bin');
+}
+
+async function writeEncryptedVault(plaintext) {
   const encrypted = await safeStorage.encryptStringAsync(plaintext);
-  return encrypted.toString('base64');
+  const target = getVaultPath();
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  try {
+    await fs.writeFile(temporary, Buffer.concat([vaultMagic, encrypted]), {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    await fs.rename(temporary, target);
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+ipcMain.handle('diary:load', async (event) => {
+  assertTrustedSender(event);
+  await assertSecureStorageAvailable();
+
+  let encrypted;
+  try {
+    encrypted = await fs.readFile(getVaultPath());
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  if (encrypted.length <= vaultMagic.length ||
+      !encrypted.subarray(0, vaultMagic.length).equals(vaultMagic)) {
+    throw new Error('加密日記檔案格式錯誤。');
+  }
+  const decrypted = await safeStorage.decryptStringAsync(encrypted.subarray(vaultMagic.length));
+  if (!decrypted || typeof decrypted.result !== 'string') {
+    throw new Error('加密日記資料無法解鎖。');
+  }
+  if (decrypted.shouldReEncrypt) {
+    await writeEncryptedVault(decrypted.result);
+  }
+  return decrypted.result;
 });
 
-ipcMain.handle('diary:decrypt', async (event, encodedCiphertext) => {
+ipcMain.handle('diary:save', async (event, plaintext) => {
   assertTrustedSender(event);
-  if (typeof encodedCiphertext !== 'string' ||
-      !/^[A-Za-z0-9+/]+={0,2}$/.test(encodedCiphertext)) {
-    throw new TypeError('Ciphertext is malformed.');
+  if (typeof plaintext !== 'string' || Buffer.byteLength(plaintext, 'utf8') > maxVaultBytes) {
+    throw new TypeError('日記資料超過安全儲存限制。');
   }
   await assertSecureStorageAvailable();
-  const decrypted = await safeStorage.decryptStringAsync(Buffer.from(encodedCiphertext, 'base64'));
-  if (!decrypted || typeof decrypted.result !== 'string') {
-    throw new Error('Encrypted diary data could not be decrypted.');
-  }
-
-  let replacementCiphertext = null;
-  if (decrypted.shouldReEncrypt) {
-    const replacement = await safeStorage.encryptStringAsync(decrypted.result);
-    replacementCiphertext = replacement.toString('base64');
-  }
-  return { plaintext: decrypted.result, replacementCiphertext };
+  await writeEncryptedVault(plaintext);
 });
 
 function createWindow() {
