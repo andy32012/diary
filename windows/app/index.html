@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'">
 <title>日記</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -63,6 +64,13 @@
   <h2>今天過得好嗎？</h2>
 </div>
 
+<div class="secure-gate" id="secureGate">
+  <div class="secure-gate-card">
+    <div class="scale-icon">🔐</div>
+    <p id="secureGateMessage">正在使用系統金鑰保護日記…</p>
+    <button id="secureRetry" class="hidden">重新載入</button>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>
