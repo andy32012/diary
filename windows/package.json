@@ -18,6 +18,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "vault.js",
       "app/**"
     ],
     "win": {
@@ -32,3 +33,4 @@
     "electron@44.7.2": true
   }
 }
+

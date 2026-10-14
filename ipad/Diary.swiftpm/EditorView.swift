@@ -90,7 +90,7 @@ struct EditorView: View {
         .sensoryFeedback(.selection, trigger: selectedMood)
         .onAppear {
             guard let body = entry.bodyText, let mood = entry.moodValue else {
-                encryptionError = "無法解密這篇日記。原始資料仍保留，請確認裝置上的 Keychain 金鑰。"
+                encryptionError = "無法解密這篇日記。原始資料仍保留，請重新解鎖，或檢查備份中的加密金鑰檔。"
                 showEncryptionError = true
                 bodyEncryptionFailed = true
                 moodEncryptionFailed = true
@@ -148,3 +148,4 @@ struct MoodPicker: View {
         }
     }
 }
+

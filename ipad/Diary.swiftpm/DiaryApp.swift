@@ -1,5 +1,7 @@
 import SwiftUI
 import SwiftData
+import UIKit
+import Combine
 
 @main
 struct DiaryApp: App {
@@ -25,92 +27,149 @@ struct DiaryApp: App {
     }
 }
 
-/// Encrypt existing SwiftData rows before exposing diary content to the UI.
+/// The content view exists only during an authenticated, foreground session.
 private struct EncryptionGate: View {
     @Environment(\.modelContext) private var context
+    @Environment(\.scenePhase) private var scenePhase
     @Query private var entries: [Entry]
     @Query private var weights: [WeightRecord]
     @State private var isReady = false
+    @State private var setupRequired = false
+    @State private var password = ""
+    @State private var confirmation = ""
+    @State private var busy = false
     @State private var errorMessage: String?
+    @State private var lastActivity = Date.now
+    @State private var generation = 0
+    private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
-            if isReady {
-                ContentView()
-            } else if let errorMessage {
-                VStack(spacing: 16) {
-                    Mascot(size: 90)
-                    Text("無法安全開啟日記")
-                        .font(.system(.title3, design: .rounded, weight: .bold))
-                        .foregroundStyle(Theme.ink)
-                    Text(errorMessage)
-                        .font(.system(.callout, design: .rounded))
-                        .foregroundStyle(Theme.ink.opacity(0.7))
-                        .multilineTextAlignment(.center)
-                    Button("重試") {
-                        self.errorMessage = nil
-                        migrate()
+            if isReady && scenePhase == .active {
+                VStack(spacing: 0) {
+                    HStack {
+                        Spacer()
+                        Button("鎖定日記", systemImage: "lock.fill") { lock() }
+                            .padding(12)
                     }
-                    .buttonStyle(.bouncy)
+                    ContentView()
                 }
-                .padding(32)
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.background.ignoresSafeArea())
+                .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in lastActivity = .now })
             } else {
-                ProgressView("正在保護日記資料…")
-                    .tint(Theme.pinkDeep)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Theme.background.ignoresSafeArea())
+                ScrollView {
+                    VStack(spacing: 16) {
+                        Mascot(size: 90)
+                        Text(setupRequired ? "設定日記密碼" : "日記已鎖定")
+                            .font(.title2.bold())
+                        SecureField("日記密碼", text: $password)
+                            .textContentType(setupRequired ? .newPassword : .password)
+                        if setupRequired {
+                            SecureField("再次輸入密碼", text: $confirmation)
+                                .textContentType(.newPassword)
+                            Text("至少 12 個字元，建議使用密碼管理器產生長密碼。舊日記會在解鎖後安全遷移。")
+                        }
+                        Text("沒有密碼復原或重設功能。忘記密碼將無法讀取日記；備份時需同時保留資料庫與加密金鑰檔。")
+                        Text("切到背景或閒置 5 分鐘會自動鎖定。")
+                        if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+                        Button(busy ? "處理中…" : (setupRequired ? "建立密碼並加密" : "解鎖")) { unlock() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(busy || password.isEmpty)
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    .padding(32)
+                    .frame(maxWidth: 520)
+                    .frame(maxWidth: .infinity)
+                }
+                .background(Theme.background.ignoresSafeArea())
             }
         }
-        .task {
-            if !isReady && errorMessage == nil {
-                migrate()
-            }
+        .task { refreshSetup() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { lock() }
+            else { refreshSetup() }
+        }
+        .onReceive(clock) { now in
+            if isReady && now.timeIntervalSince(lastActivity) >= 300 { lock() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UITextView.textDidChangeNotification)) { _ in
+            if isReady { lastActivity = .now }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidChangeNotification)) { _ in
+            if isReady { lastActivity = .now }
         }
     }
 
-    private func migrate() {
-        do {
-            _ = try DiaryCrypto.encrypt("")
-
-            for entry in entries {
-                if let encryptedBody = entry.encryptedBody {
-                    _ = try DiaryCrypto.decrypt(encryptedBody)
-                    entry.body = ""
-                } else {
-                    try entry.encryptBody(entry.body)
-                }
-
-                if let encryptedMood = entry.encryptedMood {
-                    let text = try DiaryCrypto.decrypt(encryptedMood)
-                    guard let value = Int(text), (1...5).contains(value) else {
-                        throw DiaryCryptoError.invalidCiphertext
-                    }
-                    entry.mood = 0
-                } else {
-                    try entry.encryptMood(entry.mood)
-                }
-            }
-
-            for record in weights {
-                if let encryptedKg = record.encryptedKg {
-                    let text = try DiaryCrypto.decrypt(encryptedKg)
-                    guard let value = Double(text), value.isFinite else {
-                        throw DiaryCryptoError.invalidCiphertext
-                    }
-                    record.kg = 0
-                } else {
-                    try record.encryptWeight(record.kg)
-                }
-            }
-
-            try context.save()
-            isReady = true
-        } catch {
-            errorMessage = error.localizedDescription
+    private func refreshSetup() {
+        do { setupRequired = try DiaryCrypto.needsSetup() }
+        catch { errorMessage = error.localizedDescription }
+    }
+    private func lock() {
+        generation += 1
+        // Values are already encrypted by the editors. Flush them before releasing the key.
+        if isReady {
+            do { try context.save() }
+            catch { errorMessage = "儲存失敗：\(error.localizedDescription)；請重新解鎖後重試。" }
         }
+        isReady = false
+        password = ""; confirmation = ""
+        DiaryCrypto.lock()
+    }
+    private func unlock() {
+        guard !busy, scenePhase == .active else { return }
+        if setupRequired && (password.count < 12 || password != confirmation) {
+            errorMessage = "請使用至少 12 個字元，並確認兩次密碼相同。"
+            return
+        }
+        let attempt = generation
+        let secret = password
+        let hasEncryptedRecords = entries.contains { $0.encryptedBody != nil || $0.encryptedMood != nil }
+            || weights.contains { $0.encryptedKg != nil }
+        password = ""; confirmation = ""; busy = true; errorMessage = nil
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try DiaryCrypto.unlock(password: secret, hasEncryptedRecords: hasEncryptedRecords)
+                }.value
+                guard attempt == generation, scenePhase == .active else {
+                    DiaryCrypto.lock(); busy = false; refreshSetup(); return
+                }
+                try migrate()
+                try DiaryCrypto.finishMigration()
+                lastActivity = .now
+                isReady = true
+            } catch {
+                context.rollback()
+                DiaryCrypto.lock()
+                errorMessage = error.localizedDescription
+            }
+            busy = false
+            refreshSetup()
+        }
+    }
+    private func migrate() throws {
+        // Stage and validate everything before modifying SwiftData objects.
+        let stagedEntries = try entries.map { entry -> (Entry, Data, Data) in
+            let body = try entry.encryptedBody.map { try DiaryCrypto.decrypt($0) } ?? entry.body
+            let moodText = try entry.encryptedMood.map { try DiaryCrypto.decrypt($0) } ?? String(entry.mood)
+            guard let mood = Int(moodText), (1...5).contains(mood) else { throw DiaryCryptoError.invalidCiphertext }
+            return (entry, try DiaryCrypto.encrypt(body), try DiaryCrypto.encrypt(String(mood)))
+        }
+        let stagedWeights = try weights.map { record -> (WeightRecord, Data) in
+            let text = try record.encryptedKg.map { try DiaryCrypto.decrypt($0) } ?? String(record.kg)
+            guard let value = Double(text), value.isFinite, (20...300).contains(value) else { throw DiaryCryptoError.invalidCiphertext }
+            return (record, try DiaryCrypto.encrypt(String(value)))
+        }
+        let autosave = context.autosaveEnabled
+        context.autosaveEnabled = false
+        defer { context.autosaveEnabled = autosave }
+        do {
+            for (entry, body, mood) in stagedEntries {
+                entry.encryptedBody = body; entry.encryptedMood = mood
+                entry.body = ""; entry.mood = 0
+            }
+            for (record, kg) in stagedWeights { record.encryptedKg = kg; record.kg = 0 }
+            try context.save()
+        } catch { context.rollback(); throw error }
     }
 }
 
@@ -137,3 +196,4 @@ struct SplashView: View {
         }
     }
 }
+

@@ -10,7 +10,7 @@
 <body>
 <div id="bubbles"></div>
 
-<aside class="sidebar">
+<aside class="sidebar" inert>
   <h1>我的日記 ✿</h1>
   <div class="seg">
     <button class="on" data-mode="list">日記</button>
@@ -36,7 +36,7 @@
   <button class="add" id="add" title="寫新日記 (Ctrl+N)">✎</button>
 </aside>
 
-<main class="detail">
+<main class="detail" inert>
   <div id="emptyDetail" class="empty-detail">
     <div class="mascot big"><div class="eyes"><i class="eye"></i><i class="eye"></i></div><div class="cheeks"><i class="cheek"></i><i class="cheek"></i></div><i class="mouth"></i></div>
     <p>選一篇日記，或寫一篇新的吧</p>
@@ -64,13 +64,19 @@
   <h2>今天過得好嗎？</h2>
 </div>
 
-<div class="secure-gate" id="secureGate">
-  <div class="secure-gate-card">
+<button id="lockDiary" class="lock-diary hidden">🔒 鎖定</button>
+<div class="secure-gate" id="secureGate" role="dialog" aria-modal="true" aria-label="解鎖日記">
+  <form class="secure-gate-card" id="vaultForm">
     <div class="scale-icon">🔐</div>
-    <p id="secureGateMessage">正在使用系統金鑰保護日記…</p>
-    <button id="secureRetry" class="hidden">重新載入</button>
-  </div>
+    <p id="secureGateMessage" role="status">正在讀取加密設定…</p>
+    <label>日記密碼<input id="vaultPassword" type="password" autocomplete="current-password" required maxlength="1024"></label>
+    <label id="confirmLabel" class="hidden">再次輸入密碼<input id="vaultConfirm" type="password" autocomplete="new-password" maxlength="1024"></label>
+    <p>建議使用密碼管理器產生長密碼。沒有密碼復原或重設功能；忘記密碼將無法讀取日記。</p>
+    <p>切換視窗、鎖定電腦或閒置 5 分鐘會自動鎖定。</p>
+    <button id="vaultSubmit" type="submit" disabled>解鎖</button>
+  </form>
 </div>
 <script src="app.js"></script>
 </body>
 </html>
+

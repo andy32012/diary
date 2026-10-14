@@ -9,11 +9,13 @@ const MASCOT = size => `<div class="mascot ${size}"><div class="eyes"><i class="
 let entries = [];
 let selectedId = null;
 let storageReady = false;
-let saveRunning = false;
-let saveDirty = false;
 let mode = 'list';
 let calMonth = new Date();
 let selDay = new Date();
+let setupRequired = false;
+let legacyLocal = false;
+let viewEpoch = 0;
+let unlocking = false;
 
 function readLegacyArray(key) {
   const raw = localStorage.getItem(key);
@@ -22,61 +24,98 @@ function readLegacyArray(key) {
   if (!Array.isArray(value)) throw new Error('舊日記資料格式錯誤。');
   return value;
 }
-
-function showStorageFailure(error) {
+function clearPrivateView() {
   storageReady = false;
-  $('secureGateMessage').textContent = `無法安全開啟或儲存日記：${error?.message || '加密服務無法使用。'}`;
-  $('secureRetry').classList.remove('hidden');
+  viewEpoch++;
+  entries = []; weights = []; selectedId = null;
+  for (const id of ['body', 'search', 'wKg', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
+  for (const id of ['cards', 'grid', 'wList', 'wStats', 'chart', 'edDate', 'count']) $(id).replaceChildren();
+  $('editor').classList.add('hidden');
   $('secureGate').classList.remove('hidden');
+  $('lockDiary').classList.add('hidden');
+  document.querySelector('main').inert = true;
+  document.querySelector('aside').inert = true;
+  document.querySelector('.detail').style.background = '';
 }
-
+function showStorageFailure(error) {
+  clearPrivateView();
+  $('secureGateMessage').textContent = `無法安全開啟或儲存：${error?.message || '請稍後再試。'}`;
+  void window.diaryCrypto.lock();
+}
 function save() {
   if (!storageReady) return Promise.resolve();
-  saveDirty = true;
-  if (saveRunning) return Promise.resolve();
-
-  saveRunning = true;
-  const flush = async () => {
-    try {
-      while (saveDirty && storageReady) {
-        saveDirty = false;
-        const snapshot = JSON.stringify({ version: 1, entries, weights });
-        await window.diaryCrypto.save(snapshot);
-      }
-    } catch (error) {
-      showStorageFailure(error);
-    } finally {
-      saveRunning = false;
-      if (saveDirty && storageReady) save();
-    }
-  };
-  return flush();
+  // Submit every edit immediately; the main process serializes durable writes.
+  return window.diaryCrypto.save(JSON.stringify({ version: 1, entries, weights }))
+    .catch(showStorageFailure);
 }
-
-async function initializeSecureStore() {
-  const plaintext = await window.diaryCrypto.load();
-  if (plaintext !== null) {
-    const vault = JSON.parse(plaintext);
-    if (vault?.version !== 1 || !Array.isArray(vault.entries) || !Array.isArray(vault.weights)) {
-      throw new Error('加密日記資料格式錯誤。');
-    }
-    entries = vault.entries;
-    weights = vault.weights;
-    // Remove old plaintext only after the encrypted file has been opened successfully.
-    localStorage.removeItem(STORE);
-    localStorage.removeItem(WSTORE);
-  } else {
-    entries = readLegacyArray(STORE);
-    weights = readLegacyArray(WSTORE);
-    await window.diaryCrypto.save(JSON.stringify({ version: 1, entries, weights }));
-    localStorage.removeItem(STORE);
-    localStorage.removeItem(WSTORE);
+async function refreshGate() {
+  const status = await window.diaryCrypto.status();
+  setupRequired = status.setup; legacyLocal = status.legacyLocal;
+  $('vaultSubmit').disabled = unlocking;
+  $('confirmLabel').classList.toggle('hidden', !setupRequired);
+  $('vaultSubmit').textContent = setupRequired ? '建立密碼並加密' : '解鎖';
+  $('vaultPassword').autocomplete = setupRequired ? 'new-password' : 'current-password';
+  $('secureGateMessage').textContent = setupRequired
+    ? '設定至少 12 個字元的長密碼。舊日記將遷移至密碼加密。'
+    : '日記已鎖定，請輸入獨立日記密碼。';
+}
+$('vaultForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (unlocking) return;
+  let password = $('vaultPassword').value;
+  if (setupRequired && ([...password].length < 12 || password !== $('vaultConfirm').value)) {
+    $('secureGateMessage').textContent = '請輸入至少 12 個字元，並確認兩次密碼相同。';
+    return;
   }
-  storageReady = true;
-  renderAll();
-  if (mode === 'weight') renderWeights();
-  $('secureGate').classList.add('hidden');
+  const attempt = viewEpoch;
+  unlocking = true; $('vaultSubmit').disabled = true;
+  $('secureGateMessage').textContent = '正在安全解鎖，請稍候…';
+  $('vaultPassword').value = ''; $('vaultConfirm').value = '';
+  try {
+    const legacy = legacyLocal ? JSON.stringify({ version: 1, entries: readLegacyArray(STORE), weights: readLegacyArray(WSTORE) }) : null;
+    const text = await window.diaryCrypto.unlock(password, legacy);
+    if (attempt !== viewEpoch) { await window.diaryCrypto.lock(); return; }
+    const data = JSON.parse(text);
+    entries = data.entries; weights = data.weights;
+    localStorage.removeItem(STORE); localStorage.removeItem(WSTORE);
+    storageReady = true;
+    renderAll(); if (mode === 'weight') renderWeights();
+    $('secureGate').classList.add('hidden');
+    $('lockDiary').classList.remove('hidden');
+    document.querySelector('main').inert = false;
+    document.querySelector('aside').inert = false;
+  } catch (error) {
+    if (attempt === viewEpoch) {
+      clearPrivateView();
+      await window.diaryCrypto.lock();
+      $('secureGateMessage').textContent = error.message;
+    }
+  } finally {
+    password = null; unlocking = false; $('vaultSubmit').disabled = false;
+  }
+});
+window.diaryCrypto.onLocked(() => {
+  clearPrivateView();
+  refreshGate().catch(error => { $('secureGateMessage').textContent = error.message; });
+});
+$('lockDiary').onclick = () => { clearPrivateView(); void window.diaryCrypto.lock(); };
+let lastActivity = 0;
+for (const type of ['pointerdown', 'click', 'keydown', 'input']) {
+  document.addEventListener(type, event => {
+    if (!storageReady && !event.target.closest('#secureGate')) {
+      event.preventDefault(); event.stopImmediatePropagation(); return;
+    }
+    if (storageReady && event.isTrusted && Date.now() - lastActivity > 1000) {
+      lastActivity = Date.now(); window.diaryCrypto.activity();
+    }
+  }, true);
 }
+window.addEventListener('blur', () => {
+  clearPrivateView(); void window.diaryCrypto.lock();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { clearPrivateView(); void window.diaryCrypto.lock(); }
+});
 
 const fmtShort = iso => new Date(iso).toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'short' });
 const fmtLong = iso => new Date(iso).toLocaleDateString('zh-TW', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
@@ -111,11 +150,13 @@ $('cards').addEventListener('click', ev => {
 });
 $('cards').addEventListener('contextmenu', ev => {
   const card = ev.target.closest('.card');
-  if (!card || !confirm('要刪除這篇日記嗎？')) return;
+  const attempt = viewEpoch;
+  if (!card || !confirm('要刪除這篇日記嗎？') || !storageReady || attempt !== viewEpoch) return;
   ev.preventDefault();
   const id = Number(card.dataset.id);
   card.classList.add('leaving');
   setTimeout(() => {
+    if (!storageReady || attempt !== viewEpoch) return;
     entries = entries.filter(e => e.id !== id);
     save();
     if (selectedId === id) select(null); else renderAll();
@@ -199,7 +240,8 @@ $('wKg').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('wSave').
 
 $('wList').addEventListener('click', ev => {
   const del = ev.target.closest('.del');
-  if (!del || !confirm('要刪除這筆體重嗎？')) return;
+  const attempt = viewEpoch;
+  if (!del || !confirm('要刪除這筆體重嗎？') || !storageReady || attempt !== viewEpoch) return;
   weights = weights.filter(w => w.date !== del.dataset.date);
   saveWeights(); renderWeights();
 });
@@ -302,6 +344,7 @@ $('moods').addEventListener('click', ev => {
 });
 
 function setMood(m) {
+  if (!storageReady) return;
   const e = selected();
   if (!e) return;
   e.mood = m;
@@ -314,6 +357,7 @@ function setMood(m) {
 }
 
 function select(id) {
+  if (!storageReady) return;
   const prev = selected();
   if (prev && prev.id !== id && isBlank(prev)) {
     entries = entries.filter(e => e !== prev);
@@ -339,6 +383,7 @@ function select(id) {
 
 $('body').addEventListener('input', () => {
   const e = selected();
+  if (!storageReady || !e) return;
   e.body = $('body').value;
   e.updated = new Date().toISOString();
   $('count').textContent = `${e.body.length} 字`;
@@ -346,6 +391,7 @@ $('body').addEventListener('input', () => {
 });
 
 function addEntry() {
+  if (!storageReady) return;
   const date = mode === 'calendar' ? new Date(selDay) : new Date();
   if (mode === 'calendar') date.setHours(new Date().getHours(), new Date().getMinutes());
   const e = { id: Date.now(), date: date.toISOString(), mood: 3, body: '' };
@@ -372,9 +418,14 @@ function confettiAt(el, dy = 0) {
     setTimeout(() => p.remove(), 950);
   }
 }
-$('done').onclick = () => { confetti(); setTimeout(() => select(null), 800); };
+$('done').onclick = () => {
+  const attempt = viewEpoch, id = selectedId;
+  confetti();
+  setTimeout(() => { if (storageReady && attempt === viewEpoch && selectedId === id) select(null); }, 800);
+};
 
 document.addEventListener('keydown', ev => {
+  if (!storageReady) return;
   if (ev.ctrlKey && ev.key.toLowerCase() === 'n') { ev.preventDefault(); addEntry(); }
   if (ev.ctrlKey && ev.key === 'Enter' && selected()) $('done').click();
 });
@@ -392,6 +443,6 @@ for (let i = 0; i < 14; i++) {
   });
   $('bubbles').appendChild(b);
 }
-$('secureRetry').addEventListener('click', () => window.location.reload());
-initializeSecureStore().catch(showStorageFailure);
+refreshGate().catch(error => { $('secureGateMessage').textContent = error.message; });
 setTimeout(() => $('splash').classList.add('out'), 1600);
+

@@ -233,7 +233,7 @@ struct WeightChartView: View {
     private var stats: some View {
         let kgs = records.compactMap(\.weightValue)
         let change = kgs.count > 1 ? ((kgs.last! - kgs.first!) * 10).rounded() / 10 : 0
-        let items: [(String, String)] = records.isEmpty
+        let items: [(String, String)] = kgs.isEmpty
             ? [("最新", "—"), ("總變化", "—"), ("最低", "—"), ("最高", "—")]
             : [("最新", String(format: "%.1f kg", kgs.last!)),
                ("總變化", String(format: "%@%.1f kg", change > 0 ? "+" : "", change) + (change < 0 ? " 🎉" : "")),
@@ -312,3 +312,4 @@ struct WeightChartView: View {
         .frame(maxHeight: .infinity)
     }
 }
+

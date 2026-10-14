@@ -1,116 +1,113 @@
-const { app, BrowserWindow, Menu, ipcMain, safeStorage } = require('electron');
-const fs = require('fs/promises');
-const path = require('path');
-const { pathToFileURL } = require('url');
-const { randomUUID } = require('crypto');
-
-let mainWindow = null;
+'use strict';
+const { app, BrowserWindow, Menu, ipcMain, safeStorage, powerMonitor } = require('electron');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { randomBytes } = require('node:crypto');
+const vault = require('./vault');
 const indexPath = path.join(__dirname, 'app', 'index.html');
 const trustedPage = pathToFileURL(indexPath).href;
-const vaultMagic = Buffer.from('DIARY-VAULT-V1\n');
-const maxVaultBytes = 32 * 1024 * 1024;
-
-function assertTrustedSender(event) {
-  if (!mainWindow ||
-      event.sender !== mainWindow.webContents ||
-      event.senderFrame !== mainWindow.webContents.mainFrame) {
-    throw new Error('Untrusted renderer requested diary storage.');
-  }
+let mainWindow, session, accepting = false, epoch = 0, timer, queue = Promise.resolve();
+let failures = 0, retryAt = 0, quitting = false;
+const enqueue = fn => { const next = queue.then(fn); queue = next.catch(() => {}); return next; };
+const file = () => path.join(app.getPath('userData'), 'diary-vault.bin');
+function trusted(event) {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame || event.senderFrame.url !== trustedPage) throw Error('不允許的儲存請求。');
 }
-
-async function assertSecureStorageAvailable() {
-  if (!await safeStorage.isAsyncEncryptionAvailable()) {
-    throw new Error('Windows 安全儲存服務目前無法使用。');
-  }
-  if (process.platform === 'linux' &&
-      safeStorage.getSelectedStorageBackend() === 'basic_text') {
-    throw new Error('目前系統沒有可用的安全金鑰儲存區。');
-  }
+function clearKey() { session?.key.fill(0); session = null; }
+function lock() {
+  accepting = false; epoch++; clearTimeout(timer);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('diary:locked');
+  return enqueue(() => clearKey());
 }
-
-function getVaultPath() {
-  return path.join(app.getPath('userData'), 'diary-vault.bin');
-}
-
-async function writeEncryptedVault(plaintext) {
-  const encrypted = await safeStorage.encryptStringAsync(plaintext);
-  const target = getVaultPath();
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  try {
-    await fs.writeFile(temporary, Buffer.concat([vaultMagic, encrypted]), {
-      flag: 'wx',
-      mode: 0o600,
-    });
-    await fs.rename(temporary, target);
-  } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
-}
-
-ipcMain.handle('diary:load', async (event) => {
-  assertTrustedSender(event);
-  await assertSecureStorageAvailable();
-
-  let encrypted;
-  try {
-    encrypted = await fs.readFile(getVaultPath());
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
-  if (encrypted.length > maxVaultBytes + vaultMagic.length + 1024) {
-    throw new Error('加密日記檔案超過安全儲存限制。');
-  }
-  if (encrypted.length <= vaultMagic.length ||
-      !encrypted.subarray(0, vaultMagic.length).equals(vaultMagic)) {
-    throw new Error('加密日記檔案格式錯誤。');
-  }
-  const decrypted = await safeStorage.decryptStringAsync(encrypted.subarray(vaultMagic.length));
-  if (!decrypted || typeof decrypted.result !== 'string') {
-    throw new Error('加密日記資料無法解鎖。');
-  }
-  if (decrypted.shouldReEncrypt) {
-    await writeEncryptedVault(decrypted.result);
-  }
-  return decrypted.result;
-});
-
-ipcMain.handle('diary:save', async (event, plaintext) => {
-  assertTrustedSender(event);
-  if (typeof plaintext !== 'string' || Buffer.byteLength(plaintext, 'utf8') > maxVaultBytes) {
-    throw new TypeError('日記資料超過安全儲存限制。');
-  }
-  await assertSecureStorageAvailable();
-  await writeEncryptedVault(plaintext);
-});
-
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 760,
-    minWidth: 720,
-    minHeight: 520,
-    title: '日記',
-    backgroundColor: '#fffaf0',
-    autoHideMenuBar: true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      preload: path.join(__dirname, 'preload.js'),
-    },
+function activity() { clearTimeout(timer); if (accepting) timer = setTimeout(() => { void lock(); }, 5 * 60 * 1000); }
+ipcMain.handle('diary:status', event => {
+  trusted(event);
+  return enqueue(async () => {
+    const data = await vault.read(file());
+    if (data && !data.subarray(0, vault.MAGIC.length).equals(vault.MAGIC) && !data.subarray(0, vault.LEGACY.length).equals(vault.LEGACY)) throw Error('日記格式錯誤；未覆寫原始檔案。');
+    return { legacyLocal: !data, setup: !data || data.subarray(0, vault.LEGACY.length).equals(vault.LEGACY) };
   });
-
+});
+ipcMain.handle('diary:unlock', (event, password, legacyText) => {
+  trusted(event);
+  const requestedEpoch = epoch;
+  return enqueue(async () => {
+    if (requestedEpoch !== epoch || !mainWindow?.isFocused()) throw Error('視窗已鎖定，請重新解鎖。');
+    if (Date.now() < retryAt) throw Error('嘗試過於頻繁，請稍後再試（最長 30 秒）。');
+    if (session) throw Error('請先鎖定日記。');
+    let candidate;
+    try {
+      const data = await vault.read(file());
+      if (data?.subarray(0, vault.MAGIC.length).equals(vault.MAGIC)) {
+        candidate = await vault.open(data, password);
+      } else {
+        let text;
+        if (data) {
+          if (!data.subarray(0, vault.LEGACY.length).equals(vault.LEGACY)) throw Error('舊日記格式錯誤。');
+          if (!await safeStorage.isAsyncEncryptionAvailable() || (process.platform === 'linux' && safeStorage.getSelectedStorageBackend() === 'basic_text')) throw Error('無法取得舊日記的系統金鑰。');
+          const result = await safeStorage.decryptStringAsync(data.subarray(vault.LEGACY.length));
+          text = vault.validate(result.result);
+        } else {
+          text = vault.validate(legacyText);
+        }
+        const salt = randomBytes(16);
+        candidate = { salt, key: await vault.keyFrom(password, salt, true), text };
+        const encrypted = vault.seal(text, candidate.key, salt);
+        // Verify before replacing the only existing vault.
+        const check = await vault.open(encrypted, password);
+        check.key.fill(0);
+        if (requestedEpoch !== epoch) throw Error('視窗已鎖定，請重新解鎖。');
+        await vault.write(file(), encrypted);
+      }
+      if (requestedEpoch !== epoch || !mainWindow?.isFocused()) throw Error('視窗已鎖定，請重新解鎖。');
+      const text = candidate.text;
+      session = { key: candidate.key, salt: candidate.salt };
+      candidate = null; accepting = true; failures = 0; retryAt = 0; activity();
+      return text;
+    } catch (error) {
+      failures++; retryAt = Date.now() + Math.min(30000, 1000 * 2 ** Math.min(failures - 1, 5));
+      throw error;
+    } finally { candidate?.key.fill(0); password = null; legacyText = null; }
+  });
+});
+ipcMain.handle('diary:save', (event, plaintext) => {
+  trusted(event);
+  if (!accepting) throw Error('日記已鎖定。');
+  const acceptedEpoch = epoch;
+  return enqueue(async () => {
+    // Saves accepted before lock finish before the queued key destruction.
+    if (!session) throw Error('日記已鎖定。');
+    await vault.write(file(), vault.seal(plaintext, session.key, session.salt));
+    plaintext = null;
+    return acceptedEpoch;
+  });
+});
+ipcMain.handle('diary:lock', event => { trusted(event); return lock(); });
+ipcMain.on('diary:activity', event => { trusted(event); activity(); });
+function createWindow() {
+  mainWindow = new BrowserWindow({ width: 1100, height: 760, minWidth: 720, minHeight: 520, title: '日記', backgroundColor: '#fffaf0', autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, 'preload.js') } });
   Menu.setApplicationMenu(null);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== trustedPage) event.preventDefault();
-  });
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.webContents.on('will-navigate', (event, url) => { if (url !== trustedPage) event.preventDefault(); });
+  mainWindow.webContents.on('did-start-loading', () => { void lock(); });
+  mainWindow.webContents.on('render-process-gone', () => { void lock(); });
+  mainWindow.on('blur', () => { void lock(); });
+  mainWindow.on('closed', () => { mainWindow = null; void lock(); });
   mainWindow.loadFile(indexPath);
 }
-
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => app.quit());
+if (!app.requestSingleInstanceLock()) { app.quit(); }
+else {
+  app.whenReady().then(() => {
+    powerMonitor.on('lock-screen', () => { void lock(); });
+    powerMonitor.on('suspend', () => { void lock(); });
+    createWindow();
+  });
+  app.on('second-instance', () => { mainWindow?.show(); mainWindow?.focus(); });
+  app.on('before-quit', event => {
+    if (quitting) return;
+    event.preventDefault();
+    lock().finally(() => { quitting = true; app.quit(); });
+  });
+  app.on('window-all-closed', () => app.quit());
+}
