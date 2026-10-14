@@ -4,25 +4,40 @@ struct EditorView: View {
     @Bindable var entry: Entry
     let onDone: () -> Void
     @State private var burst = 0
+    @State private var draft = ""
+    @State private var selectedMood = 3
+    @State private var bodyEncryptionFailed = false
+    @State private var moodEncryptionFailed = false
+    @State private var showEncryptionError = false
+    @State private var encryptionError = ""
     @FocusState private var focused: Bool
 
     var body: some View {
         ZStack {
-            Theme.moodColor(entry.mood).opacity(0.35)
+            Theme.moodColor(selectedMood).opacity(0.35)
                 .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.5), value: entry.mood)
+                .animation(.easeInOut(duration: 0.5), value: selectedMood)
 
             VStack(alignment: .leading, spacing: 20) {
-                MoodPicker(mood: $entry.mood)
+                MoodPicker(mood: $selectedMood)
+                    .onChange(of: selectedMood) { _, value in
+                        do {
+                            try entry.encryptMood(value)
+                            moodEncryptionFailed = false
+                        } catch {
+                            reportEncryptionFailure(error)
+                            moodEncryptionFailed = true
+                        }
+                    }
 
-                TextEditor(text: $entry.body)
+                TextEditor(text: $draft)
                     .font(.system(.title3, design: .rounded))
                     .scrollContentBackground(.hidden)
                     .focused($focused)
                     .padding(16)
                     .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(.white.opacity(0.85)))
                     .overlay(alignment: .topLeading) {
-                        if entry.body.isEmpty {
+                        if draft.isEmpty {
                             Text("今天發生了什麼事呢？")
                                 .font(.system(.title3, design: .rounded))
                                 .foregroundStyle(.secondary)
@@ -30,12 +45,21 @@ struct EditorView: View {
                                 .allowsHitTesting(false)
                         }
                     }
+                    .onChange(of: draft) { _, value in
+                        do {
+                            try entry.encryptBody(value)
+                            bodyEncryptionFailed = false
+                        } catch {
+                            reportEncryptionFailure(error)
+                            bodyEncryptionFailed = true
+                        }
+                    }
 
-                Text("\(entry.body.count) 字")
+                Text("\(draft.count) 字")
                     .font(.system(.callout, design: .rounded))
                     .foregroundStyle(Theme.ink.opacity(0.6))
                     .contentTransition(.numericText())
-                    .animation(.snappy, value: entry.body.count)
+                    .animation(.snappy, value: draft.count)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .padding(28)
@@ -59,10 +83,33 @@ struct EditorView: View {
                     .labelStyle(.titleAndIcon)
                     .font(.system(.body, design: .rounded, weight: .bold))
             }
+            .disabled(bodyEncryptionFailed || moodEncryptionFailed)
             .keyboardShortcut(.return, modifiers: .command)
             .sensoryFeedback(.success, trigger: burst)
         }
-        .onAppear { if entry.isBlank { focused = true } }
+        .sensoryFeedback(.selection, trigger: selectedMood)
+        .onAppear {
+            guard let body = entry.bodyText, let mood = entry.moodValue else {
+                encryptionError = "無法解密這篇日記。原始資料仍保留，請確認裝置上的 Keychain 金鑰。"
+                showEncryptionError = true
+                bodyEncryptionFailed = true
+                moodEncryptionFailed = true
+                return
+            }
+            draft = body
+            selectedMood = mood
+            if entry.isBlank { focused = true }
+        }
+        .alert("無法安全儲存", isPresented: $showEncryptionError) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(encryptionError)
+        }
+    }
+
+    private func reportEncryptionFailure(_ error: Error) {
+        encryptionError = error.localizedDescription
+        showEncryptionError = true
     }
 }
 
@@ -99,6 +146,5 @@ struct MoodPicker: View {
                 .buttonStyle(.bouncy)
             }
         }
-        .sensoryFeedback(.selection, trigger: mood)
     }
 }
