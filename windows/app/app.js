@@ -41,7 +41,6 @@ function save() {
       while (saveDirty && storageReady) {
         saveDirty = false;
         const snapshot = JSON.stringify({ version: 1, entries, weights });
-        if (saveDirty) continue;
         await window.diaryCrypto.save(snapshot);
       }
     } catch (error) {
