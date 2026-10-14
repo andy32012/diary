@@ -40,8 +40,8 @@ final class Entry {
     }
 
     func encryptMood(_ value: Int) throws {
-        guard (1...5).contains(value) else { return }
-        encryptedMood = try DiaryCrypto.encrypt(String(value))
+        let normalizedValue = min(max(value, 1), 5)
+        encryptedMood = try DiaryCrypto.encrypt(String(normalizedValue))
         mood = 0
     }
 
