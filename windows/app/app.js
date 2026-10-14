@@ -3,8 +3,6 @@ const NAMES = ['難過', '不太好', '普通', '不錯', '超開心'];
 const COLORS = ['#d1c7fa', '#bfdbff', '#ffd9ba', '#bdeed9', '#ffb5c7'];
 const STORE = 'diary.entries';
 const WSTORE = 'diary.weights';
-const VAULT = 'diary.encrypted.v1';
-const VAULT_PREFIX = 'v1:';
 const $ = id => document.getElementById(id);
 const MASCOT = size => `<div class="mascot ${size}"><div class="eyes"><i class="eye"></i><i class="eye"></i></div><div class="cheeks"><i class="cheek"></i><i class="cheek"></i></div><i class="mouth"></i></div>`;
 
@@ -43,9 +41,8 @@ function save() {
       while (saveDirty && storageReady) {
         saveDirty = false;
         const snapshot = JSON.stringify({ version: 1, entries, weights });
-        const encrypted = await window.diaryCrypto.encrypt(snapshot);
         if (saveDirty) continue;
-        localStorage.setItem(VAULT, VAULT_PREFIX + encrypted);
+        await window.diaryCrypto.save(snapshot);
       }
     } catch (error) {
       showStorageFailure(error);
@@ -58,27 +55,21 @@ function save() {
 }
 
 async function initializeSecureStore() {
-  const stored = localStorage.getItem(VAULT);
-  if (stored) {
-    if (!stored.startsWith(VAULT_PREFIX)) throw new Error('加密資料版本不受支援。');
-    const decrypted = await window.diaryCrypto.decrypt(stored.slice(VAULT_PREFIX.length));
-    const vault = JSON.parse(decrypted.plaintext);
+  const plaintext = await window.diaryCrypto.load();
+  if (plaintext !== null) {
+    const vault = JSON.parse(plaintext);
     if (vault?.version !== 1 || !Array.isArray(vault.entries) || !Array.isArray(vault.weights)) {
       throw new Error('加密日記資料格式錯誤。');
     }
     entries = vault.entries;
     weights = vault.weights;
-    if (decrypted.replacementCiphertext) {
-      localStorage.setItem(VAULT, VAULT_PREFIX + decrypted.replacementCiphertext);
-    }
-    // Remove old plaintext only after the encrypted copy has been opened successfully.
+    // Remove old plaintext only after the encrypted file has been opened successfully.
     localStorage.removeItem(STORE);
     localStorage.removeItem(WSTORE);
   } else {
     entries = readLegacyArray(STORE);
     weights = readLegacyArray(WSTORE);
-    const encrypted = await window.diaryCrypto.encrypt(JSON.stringify({ version: 1, entries, weights }));
-    localStorage.setItem(VAULT, VAULT_PREFIX + encrypted);
+    await window.diaryCrypto.save(JSON.stringify({ version: 1, entries, weights }));
     localStorage.removeItem(STORE);
     localStorage.removeItem(WSTORE);
   }
