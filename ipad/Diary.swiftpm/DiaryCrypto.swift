@@ -20,12 +20,10 @@ enum DiaryCryptoError: LocalizedError {
 
 /// AES-GCM 加密；256 位元金鑰只存在 iOS Keychain。
 enum DiaryCrypto {
-    private static let keyResult: Result<SymmetricKey, Error> = Result {
-        try loadOrCreateKey()
-    }
+    private static let keyCache = KeyCache()
 
     static func encrypt(_ plaintext: String) throws -> Data {
-        let box = try AES.GCM.seal(Data(plaintext.utf8), using: keyResult.get())
+        let box = try AES.GCM.seal(Data(plaintext.utf8), using: keyCache.get { try loadOrCreateKey() })
         guard let combined = box.combined else {
             throw DiaryCryptoError.invalidCiphertext
         }
@@ -34,11 +32,25 @@ enum DiaryCrypto {
 
     static func decrypt(_ ciphertext: Data) throws -> String {
         let box = try AES.GCM.SealedBox(combined: ciphertext)
-        let plaintext = try AES.GCM.open(box, using: keyResult.get())
+        let plaintext = try AES.GCM.open(box, using: keyCache.get { try loadOrCreateKey() })
         guard let value = String(data: plaintext, encoding: .utf8) else {
             throw DiaryCryptoError.invalidUTF8
         }
         return value
+    }
+
+    private final class KeyCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cachedKey: SymmetricKey?
+
+        func get(load: () throws -> SymmetricKey) throws -> SymmetricKey {
+            lock.lock()
+            defer { lock.unlock() }
+            if let cachedKey { return cachedKey }
+            let key = try load()
+            cachedKey = key
+            return key
+        }
     }
 
     private static func loadOrCreateKey() throws -> SymmetricKey {
