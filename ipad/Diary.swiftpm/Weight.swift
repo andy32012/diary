@@ -6,10 +6,25 @@ import Charts
 final class WeightRecord {
     var date: Date      // 一天一筆，存當天 00:00
     var kg: Double
+    var encryptedKg: Data?
 
     init(date: Date, kg: Double) {
         self.date = Calendar.current.startOfDay(for: date)
         self.kg = kg
+        self.encryptedKg = nil
+    }
+
+    var weightValue: Double? {
+        guard let encryptedKg else { return kg }
+        guard let text = try? DiaryCrypto.decrypt(encryptedKg),
+              let value = Double(text),
+              value.isFinite else { return nil }
+        return value
+    }
+
+    func encryptWeight(_ value: Double) throws {
+        encryptedKg = try DiaryCrypto.encrypt(String(value))
+        kg = 0
     }
 }
 
@@ -21,6 +36,8 @@ struct WeightPanel: View {
     @State private var text = ""
     @State private var saves = 0
     @State private var shake = 0
+    @State private var encryptionError = ""
+    @State private var showEncryptionError = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -87,6 +104,11 @@ struct WeightPanel: View {
             }
         }
         .animation(.spring(response: 0.45, dampingFraction: 0.75), value: records.map(\.id))
+        .alert("無法安全記錄體重", isPresented: $showEncryptionError) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(encryptionError)
+        }
     }
 
     private func save() {
@@ -96,8 +118,17 @@ struct WeightPanel: View {
             return
         }
         let day = Calendar.current.startOfDay(for: date)
+        let roundedValue = (value * 10).rounded() / 10
+        let record = WeightRecord(date: day, kg: roundedValue)
+        do {
+            try record.encryptWeight(roundedValue)
+        } catch {
+            encryptionError = error.localizedDescription
+            showEncryptionError = true
+            return
+        }
         for old in records where old.date == day { context.delete(old) }   // 一天只留一筆
-        context.insert(WeightRecord(date: day, kg: (value * 10).rounded() / 10))
+        context.insert(record)
         text = ""
         focused = false
         saves += 1
@@ -109,16 +140,18 @@ private struct WeightRow: View {
     let previous: WeightRecord?
 
     var body: some View {
+        let value = record.weightValue ?? 0
+        let previousValue = previous?.weightValue
         HStack(spacing: 12) {
             Text(record.date, format: .dateTime.month().day().weekday())
                 .font(.system(.subheadline, design: .rounded))
                 .foregroundStyle(Theme.ink.opacity(0.7))
             Spacer()
-            Text(record.kg, format: .number.precision(.fractionLength(1)))
+            Text(value, format: .number.precision(.fractionLength(1)))
                 .font(.system(.title3, design: .rounded, weight: .heavy))
             Text("kg").font(.caption).foregroundStyle(.secondary)
             if let previous {
-                let diff = ((record.kg - previous.kg) * 10).rounded() / 10
+                let diff = ((value - (previousValue ?? value)) * 10).rounded() / 10
                 Text(diff > 0 ? "▲ +\(diff, specifier: "%.1f")" : diff < 0 ? "▼ \(diff, specifier: "%.1f")" : "－ 0.0")
                     .font(.system(.caption, design: .rounded, weight: .heavy))
                     .padding(.horizontal, 8).padding(.vertical, 3)
@@ -198,11 +231,11 @@ struct WeightChartView: View {
     }
 
     private var stats: some View {
-        let kgs = records.map(\.kg)
-        let change = records.count > 1 ? ((records.last!.kg - records.first!.kg) * 10).rounded() / 10 : 0
+        let kgs = records.compactMap(\.weightValue)
+        let change = kgs.count > 1 ? ((kgs.last! - kgs.first!) * 10).rounded() / 10 : 0
         let items: [(String, String)] = records.isEmpty
             ? [("最新", "—"), ("總變化", "—"), ("最低", "—"), ("最高", "—")]
-            : [("最新", String(format: "%.1f kg", records.last!.kg)),
+            : [("最新", String(format: "%.1f kg", kgs.last!)),
                ("總變化", String(format: "%@%.1f kg", change > 0 ? "+" : "", change) + (change < 0 ? " 🎉" : "")),
                ("最低", String(format: "%.1f kg", kgs.min()!)),
                ("最高", String(format: "%.1f kg", kgs.max()!))]
@@ -224,19 +257,19 @@ struct WeightChartView: View {
     }
 
     private var chart: some View {
-        let kgs = data.map(\.kg)
+        let kgs = data.compactMap(\.weightValue)
         let pad = max(((kgs.max() ?? 0) - (kgs.min() ?? 0)) * 0.25, 0.5)
         let low = (kgs.min() ?? 0) - pad, high = (kgs.max() ?? 0) + pad
 
         return Chart(data) { record in
             AreaMark(x: .value("日期", record.date, unit: .day),
                      yStart: .value("下限", low),
-                     yEnd: .value("體重", drawn ? record.kg : low))
+                     yEnd: .value("體重", drawn ? (record.weightValue ?? low) : low))
                 .foregroundStyle(LinearGradient(colors: [Theme.pink.opacity(0.55), Theme.lavender.opacity(0.05)],
                                                 startPoint: .top, endPoint: .bottom))
                 .interpolationMethod(.catmullRom)
             LineMark(x: .value("日期", record.date, unit: .day),
-                     y: .value("體重", drawn ? record.kg : low))
+                     y: .value("體重", drawn ? (record.weightValue ?? low) : low))
                 .foregroundStyle(Theme.pinkDeep)
                 .lineStyle(StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round))
                 .interpolationMethod(.catmullRom)
@@ -251,7 +284,7 @@ struct WeightChartView: View {
                     .foregroundStyle(Theme.pink.opacity(0.6))
                     .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 6]))
                     .annotation(position: .top) {
-                        Text(String(format: "%.1f kg", record.kg))
+                        Text(String(format: "%.1f kg", record.weightValue ?? 0))
                             .font(.system(.caption, design: .rounded, weight: .heavy))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 10).padding(.vertical, 5)
