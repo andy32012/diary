@@ -2,20 +2,75 @@ const EMOJI = ['😢', '🙁', '😐', '🙂', '😄'];
 const NAMES = ['難過', '不太好', '普通', '不錯', '超開心'];
 const COLORS = ['#d1c7fa', '#bfdbff', '#ffd9ba', '#bdeed9', '#ffb5c7'];
 const STORE = 'diary.entries';
+const WSTORE = 'diary.weights';
+const VAULT = 'diary.encrypted.v1';
+const VAULT_PREFIX = 'v1:';
 const $ = id => document.getElementById(id);
 const MASCOT = size => `<div class="mascot ${size}"><div class="eyes"><i class="eye"></i><i class="eye"></i></div><div class="cheeks"><i class="cheek"></i><i class="cheek"></i></div><i class="mouth"></i></div>`;
 
-let entries = load();
+let entries = [];
 let selectedId = null;
+let storageReady = false;
+let saveQueue = Promise.resolve();
 let mode = 'list';
 let calMonth = new Date();
 let selDay = new Date();
 
-function load() {
-  try { return JSON.parse(localStorage.getItem(STORE)) || []; } catch { return []; }
+function readLegacyArray(key) {
+  const raw = localStorage.getItem(key);
+  if (!raw) return [];
+  const value = JSON.parse(raw);
+  if (!Array.isArray(value)) throw new Error('舊日記資料格式錯誤。');
+  return value;
 }
+
+function showStorageFailure(error) {
+  storageReady = false;
+  $('secureGateMessage').textContent = `無法安全開啟或儲存日記：${error?.message || '加密服務無法使用。'}`;
+  $('secureRetry').classList.remove('hidden');
+  $('secureGate').classList.remove('hidden');
+}
+
 function save() {
-  localStorage.setItem(STORE, JSON.stringify(entries));
+  if (!storageReady) return Promise.resolve();
+  const snapshot = JSON.stringify({ version: 1, entries, weights });
+  saveQueue = saveQueue.catch(() => {}).then(async () => {
+    if (!storageReady) return;
+    const encrypted = await window.diaryCrypto.encrypt(snapshot);
+    localStorage.setItem(VAULT, VAULT_PREFIX + encrypted);
+  }).catch(showStorageFailure);
+  return saveQueue;
+}
+
+async function initializeSecureStore() {
+  const stored = localStorage.getItem(VAULT);
+  if (stored) {
+    if (!stored.startsWith(VAULT_PREFIX)) throw new Error('加密資料版本不受支援。');
+    const decrypted = await window.diaryCrypto.decrypt(stored.slice(VAULT_PREFIX.length));
+    const vault = JSON.parse(decrypted.plaintext);
+    if (vault?.version !== 1 || !Array.isArray(vault.entries) || !Array.isArray(vault.weights)) {
+      throw new Error('加密日記資料格式錯誤。');
+    }
+    entries = vault.entries;
+    weights = vault.weights;
+    if (decrypted.replacementCiphertext) {
+      localStorage.setItem(VAULT, VAULT_PREFIX + decrypted.replacementCiphertext);
+    }
+    // Remove old plaintext only after the encrypted copy has been opened successfully.
+    localStorage.removeItem(STORE);
+    localStorage.removeItem(WSTORE);
+  } else {
+    entries = readLegacyArray(STORE);
+    weights = readLegacyArray(WSTORE);
+    const encrypted = await window.diaryCrypto.encrypt(JSON.stringify({ version: 1, entries, weights }));
+    localStorage.setItem(VAULT, VAULT_PREFIX + encrypted);
+    localStorage.removeItem(STORE);
+    localStorage.removeItem(WSTORE);
+  }
+  storageReady = true;
+  renderAll();
+  if (mode === 'weight') renderWeights();
+  $('secureGate').classList.add('hidden');
 }
 
 const fmtShort = iso => new Date(iso).toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'short' });
@@ -112,10 +167,9 @@ document.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
 });
 
 /* ---------- 體重 ---------- */
-const WSTORE = 'diary.weights';
-let weights = (() => { try { return JSON.parse(localStorage.getItem(WSTORE)) || []; } catch { return []; } })();
+let weights = [];
 let rangeDays = 30;
-const saveWeights = () => localStorage.setItem(WSTORE, JSON.stringify(weights));
+const saveWeights = () => save();
 const dayKey = d => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; };
 const byDate = () => [...weights].sort((a, b) => a.date.localeCompare(b.date));
 
@@ -333,5 +387,6 @@ for (let i = 0; i < 14; i++) {
   });
   $('bubbles').appendChild(b);
 }
-renderAll();
+$('secureRetry').addEventListener('click', () => window.location.reload());
+initializeSecureStore().catch(showStorageFailure);
 setTimeout(() => $('splash').classList.add('out'), 1600);
