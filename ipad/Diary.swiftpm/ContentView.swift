@@ -12,11 +12,13 @@ struct ContentView: View {
     @State private var mode = Mode.list
     @State private var day = Date.now
     @State private var addTaps = 0
+    @State private var encryptionError = ""
+    @State private var showEncryptionError = false
 
     private var shown: [Entry] {
         switch mode {
         case .list:
-            search.isEmpty ? entries : entries.filter { $0.body.localizedCaseInsensitiveContains(search) }
+            search.isEmpty ? entries : entries.filter { $0.bodyText?.localizedCaseInsensitiveContains(search) == true }
         case .calendar:
             entries.filter { Calendar.current.isDate($0.createdAt, inSameDayAs: day) }
         case .weight:
@@ -44,6 +46,11 @@ struct ContentView: View {
         .onChange(of: mode) { if mode == .weight { selection = nil } }
         .onChange(of: selection) { old, _ in
             if let old, old.isBlank { context.delete(old) }
+        }
+        .alert("無法安全建立日記", isPresented: $showEncryptionError) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(encryptionError)
         }
     }
 
@@ -110,8 +117,15 @@ struct ContentView: View {
                 AddButton(taps: addTaps) {
                     addTaps += 1
                     let entry = Entry(createdAt: mode == .calendar ? day : .now)
-                    context.insert(entry)
-                    selection = entry
+                    do {
+                        try entry.encryptBody("")
+                        try entry.encryptMood(3)
+                        context.insert(entry)
+                        selection = entry
+                    } catch {
+                        encryptionError = error.localizedDescription
+                        showEncryptionError = true
+                    }
                 }
                 .padding(24)
                 .transition(.scale.combined(with: .opacity))
@@ -166,11 +180,12 @@ struct EntryCard: View {
     var selected = false
 
     var body: some View {
+        let mood = entry.moodValue ?? 3
         HStack(alignment: .top, spacing: 14) {
-            Text(Mood.emoji(entry.mood))
+            Text(Mood.emoji(mood))
                 .font(.system(size: 34))
                 .frame(width: 54, height: 54)
-                .background(Circle().fill(Theme.moodColor(entry.mood)))
+                .background(Circle().fill(Theme.moodColor(mood)))
                 .phaseAnimator([0.0, 8.0, -8.0, 0.0]) { view, angle in
                     view.rotationEffect(.degrees(angle))
                 } animation: { _ in .easeInOut(duration: 0.6).delay(1.5) }
@@ -178,7 +193,7 @@ struct EntryCard: View {
                 Text(entry.createdAt, format: .dateTime.month().day().weekday())
                     .font(.system(.caption, design: .rounded, weight: .semibold))
                     .foregroundStyle(Theme.ink.opacity(0.6))
-                Text(entry.isBlank ? "（新的日記）" : entry.body)
+                Text(entry.isBlank ? "（新的日記）" : (entry.bodyText ?? "（無法解密）"))
                     .font(.system(.body, design: .rounded))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(3)
@@ -190,7 +205,7 @@ struct EntryCard: View {
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(.white.opacity(selected ? 1 : 0.85))
-                .shadow(color: Theme.moodColor(entry.mood).opacity(0.6), radius: 10, y: 5)
+                .shadow(color: Theme.moodColor(mood).opacity(0.6), radius: 10, y: 5)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
