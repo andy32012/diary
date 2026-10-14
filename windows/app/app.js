@@ -11,7 +11,8 @@ const MASCOT = size => `<div class="mascot ${size}"><div class="eyes"><i class="
 let entries = [];
 let selectedId = null;
 let storageReady = false;
-let saveQueue = Promise.resolve();
+let saveRunning = false;
+let saveDirty = false;
 let mode = 'list';
 let calMonth = new Date();
 let selDay = new Date();
@@ -33,13 +34,27 @@ function showStorageFailure(error) {
 
 function save() {
   if (!storageReady) return Promise.resolve();
-  const snapshot = JSON.stringify({ version: 1, entries, weights });
-  saveQueue = saveQueue.catch(() => {}).then(async () => {
-    if (!storageReady) return;
-    const encrypted = await window.diaryCrypto.encrypt(snapshot);
-    localStorage.setItem(VAULT, VAULT_PREFIX + encrypted);
-  }).catch(showStorageFailure);
-  return saveQueue;
+  saveDirty = true;
+  if (saveRunning) return Promise.resolve();
+
+  saveRunning = true;
+  const flush = async () => {
+    try {
+      while (saveDirty && storageReady) {
+        saveDirty = false;
+        const snapshot = JSON.stringify({ version: 1, entries, weights });
+        const encrypted = await window.diaryCrypto.encrypt(snapshot);
+        if (saveDirty) continue;
+        localStorage.setItem(VAULT, VAULT_PREFIX + encrypted);
+      }
+    } catch (error) {
+      showStorageFailure(error);
+    } finally {
+      saveRunning = false;
+      if (saveDirty && storageReady) save();
+    }
+  };
+  return flush();
 }
 
 async function initializeSecureStore() {
