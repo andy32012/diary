@@ -60,6 +60,9 @@ ipcMain.handle('diary:load', async (event) => {
     if (error.code === 'ENOENT') return null;
     throw error;
   }
+  if (encrypted.length > maxVaultBytes + vaultMagic.length + 1024) {
+    throw new Error('加密日記檔案超過安全儲存限制。');
+  }
   if (encrypted.length <= vaultMagic.length ||
       !encrypted.subarray(0, vaultMagic.length).equals(vaultMagic)) {
     throw new Error('加密日記檔案格式錯誤。');
