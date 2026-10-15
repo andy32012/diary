@@ -8,7 +8,8 @@ struct EditorView: View {
     @State private var selectedMood = 3
     @State private var bodyEncryptionFailed = false
     @State private var moodEncryptionFailed = false
-    /// Undecryptable entries stay read-only so an edit cannot overwrite the only copy of the ciphertext.
+    /// Unlock already verifies every record; if one still fails to decrypt here, keep it read-only so an edit
+    /// cannot overwrite the only copy of the ciphertext.
     @State private var decryptionFailed = false
     @State private var showEncryptionError = false
     @State private var encryptionError = ""

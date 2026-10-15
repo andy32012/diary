@@ -39,6 +39,13 @@ function confirmAction(message) {
 }
 $('confirmOk').onclick = () => settleConfirm(true);
 $('confirmCancel').onclick = () => settleConfirm(false);
+// A modal dialog does not trap Tab; leaving its last button hands focus to the window frame, which fires 'blur' and locks.
+$('confirmDialog').addEventListener('keydown', ev => {
+  if (ev.key !== 'Tab') return;
+  ev.preventDefault();
+  const cancel = $('confirmCancel'), ok = $('confirmOk'), current = document.activeElement;
+  (current === cancel ? ok : current === ok ? cancel : ev.shiftKey ? ok : cancel).focus();
+});
 // Esc closes the dialog without a button; a newer dialog may already be open by the time this fires.
 $('confirmDialog').addEventListener('close', () => { if (!$('confirmDialog').open) settleConfirm(false); });
 function clearPrivateView() {

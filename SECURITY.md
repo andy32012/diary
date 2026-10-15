@@ -4,9 +4,9 @@
 
 Windows 與 iPad 首次開啟新版時須建立獨立日記密碼（至少 12 個字元、最多 1024 UTF-8 位元組）。請使用密碼管理器產生的長密碼或隨機多詞密碼。沒有預設密碼、密碼提示、復原金鑰或忘記密碼重設流程。**忘記密碼將無法復原內容。** 密碼不會自動存入 DPAPI 或 Keychain。
 
-兩版在閒置 5 分鐘、切到背景時鎖定，並提供手動鎖定。Windows 也在鎖定系統、休眠、重新載入或 renderer 結束時鎖定。解鎖期間切到背景會使該次解鎖失效。鎖定時清除畫面內容、解除明文與金鑰參照；Windows 的主程序同時拒絕未解鎖的儲存請求。Windows 的刪除確認使用頁面內對話框，不使用原生 `confirm()`：原生對話框會讓視窗失去焦點而觸發鎖定。鎖定時開啟中的確認一律視為取消。
+兩版在閒置 5 分鐘、切到背景時鎖定，並提供手動鎖定。Windows 也在鎖定系統、休眠、重新載入或 renderer 結束時鎖定。解鎖期間切到背景會使該次解鎖失效。鎖定時清除畫面內容、解除明文與金鑰參照；Windows 的主程序同時拒絕未解鎖的儲存請求。Windows 的刪除確認使用頁面內對話框，不使用原生 `confirm()`：原生對話框會讓視窗失去焦點而觸發鎖定。對話框內的 Tab／Shift+Tab 只在「取消」與「刪除」之間循環，因為焦點一離開頁面同樣會觸發鎖定。鎖定時開啟中的確認一律視為取消。
 
-iPad 若某篇日記在解鎖後仍無法解密，編輯器與心情選擇會設為唯讀，避免新輸入覆寫唯一一份密文。
+iPad 每次解鎖時，會先在記憶體中驗證並重新加密所有記錄，全部成功才寫入。只要有一筆無法解密，解鎖就會停止，日記記錄不會被修改，並顯示「密碼正確，但有記錄無法解密」，不會被誤認為密碼錯誤。編輯器另外有一層備援：解鎖後若某篇仍無法解密，內文與心情會設為唯讀，避免新輸入覆寫唯一一份密文。
 
 錯誤嘗試採 1–30 秒遞增等待，僅是程式內的輔助防護；重新啟動可以重設等待。複製檔案後的離線猜測由下列 KDF 與密碼強度抵抗，不能以介面的等待時間阻擋。
 
@@ -19,10 +19,11 @@ iPad 若某篇日記在解鎖後仍無法解密，編輯器與心情選擇會設
 ## Windows 執行環境加固
 
 - 網頁權限：相機、麥克風、通知、定位、HID/USB/序列埠等權限請求、權限檢查與裝置權限一律拒絕（Electron 預設為自動同意）。
-- 偵錯：打包版停用 DevTools；以 `--remote-debugging-port` 或 `--remote-debugging-pipe` 啟動時在建立視窗前直接結束。
+- 偵錯：除了開發時的 `electron .`（`process.defaultApp`）以外，一律停用 DevTools；帶 `--remote-debugging-port` 或 `--remote-debugging-pipe` 啟動時，會在建立視窗前直接結束。判斷不依賴 `app.isPackaged`，因為它只看執行檔名稱，把 `日記.exe` 改名為 `electron.exe` 就能繞過。能寫入檔案的同帳號惡意程式仍可改用原版 Electron 執行 `app.asar`，這屬於下方威脅範圍以外的情況。
 - Electron fuses（由 electron-builder 的 `electronFuses` 在簽章前寫入執行檔）：停用 `RunAsNode`（`ELECTRON_RUN_AS_NODE`）、`NODE_OPTIONS`、`--inspect` 類參數；只從 `app.asar` 載入程式；啟用內嵌 ASAR 完整性驗證與 cookie 加密。頁面目前仍以 `file://` 載入，因此保留 `GrantFileProtocolExtraPrivileges`；改用自訂協定前不要關閉它。
-- ASAR 完整性雜湊存在 `日記.exe` 的資源中。**未簽章時，攻擊者可同時替換執行檔與 `app.asar`**，所以這項檢查要搭配程式碼簽章才有意義。簽章需使用你自己的 Windows 程式碼簽章憑證：建置前設定 `WIN_CSC_LINK`（或 `CSC_LINK`）與 `WIN_CSC_KEY_PASSWORD`（或 `CSC_KEY_PASSWORD`），electron-builder 會自動簽章。未簽章的版本會出現 SmartScreen 警告，也無法驗證發行者。
-- 建置工具：electron-builder 26.15.3。`npm audit` 仍回報 `sprintf-js`（GHSA-hp3w-g68c-fv3c，格式字串精度造成 DoS，moderate），經由 `@electron/get` → `global-agent` → `roarr` 引入，目前沒有修正版本。它只在安裝或建置時執行，不會打包進 App。
+- ASAR 完整性雜湊存在 `日記.exe` 的資源中，可以擋下只改 `app.asar` 的竄改。**未簽章時，攻擊者可以把執行檔和 `app.asar` 一起換掉**。簽章能讓你和 Windows（SmartScreen、檔案內容的數位簽章頁）確認執行檔確實來自你、沒有被替換。不過 Windows 不會強制拒絕執行未簽章的程式，所以簽章擋不住已經能寫入檔案的惡意程式。未簽章的版本也會出現 SmartScreen 警告。
+- 程式碼簽章：自 2023 年 6 月起，公開信任的 OV／EV 程式碼簽章憑證，私鑰必須放在硬體金鑰或 HSM，CA 不再發給可匯出的 `.pfx`。electron-builder 26 支援兩種做法：一是在 Windows 建置機上，用 `win.signtoolOptions.certificateSubjectName` 或 `certificateSha1` 指定插入的硬體憑證（只能在 Windows 上簽）；二是用 `win.azureSignOptions` 搭配 Azure Trusted Signing（需要 Azure 帳號，並以 `AZURE_TENANT_ID`、`AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET` 等環境變數登入）。`WIN_CSC_LINK`／`CSC_LINK` 加上密碼的 `.pfx` 方式只適用於自簽或內部憑證，無法消除 SmartScreen 警告。
+- 建置工具：electron-builder 26.15.3。`npm audit` 仍回報 `sprintf-js`（GHSA-hp3w-g68c-fv3c，格式字串精度造成 DoS，moderate），經由 `@electron/get` → `global-agent` → `roarr` 引入，`sprintf-js` 目前沒有修正版本。它只在安裝或建置時執行，不會打包進 App。**不要執行 `npm audit fix --force`**：它會把 electron-builder 降到 26.5.0，重新帶回 critical 的 node-tar 漏洞。自動測試會檢查 lockfile 中的 electron-builder 至少是 26.15。
 
 ## 舊資料遷移
 
@@ -52,7 +53,7 @@ node --check app/app.js
 node --test tests/security.test.js
 ```
 
-自動測試包含真正的 scrypt/AES-GCM round trip、錯誤密碼、salt/nonce/ciphertext/tag 竄改、寫入失敗、來源驗證、鎖定後存取、排隊儲存、DPAPI 遷移流程、解鎖與背景鎖定競態、renderer 清除明文、權限一律拒絕、打包版拒絕遠端偵錯、fuse 設定，以及頁面內刪除確認（取消、Esc、鎖定時取消）。Electron、DPAPI 和 DOM 使用替身；不能當作 Windows 整合測試。
+自動測試包含真正的 scrypt/AES-GCM round trip、錯誤密碼、salt/nonce/ciphertext/tag 竄改、寫入失敗、來源驗證、鎖定後存取、排隊儲存、DPAPI 遷移流程、解鎖與背景鎖定競態、renderer 清除明文、權限一律拒絕、非開發模式拒絕遠端偵錯並停用 DevTools、fuse 設定與 electron-builder 版本下限，以及頁面內刪除確認（取消、Esc、鎖定時取消、Tab 不離開對話框、對話框開啟時忽略快捷鍵）。Electron、DPAPI 和 DOM 使用替身；不能當作 Windows 整合測試。
 
 建置後確認 fuses：
 
@@ -67,5 +68,5 @@ npx @electron/fuses read --app "dist/win-unpacked/日記.exe"
 3. 輸入後立即關閉，重開應保留已接受的儲存；模擬磁碟滿、唯讀、遷移中斷，確認不覆寫唯一可用資料。
 4. iPad 確認 CommonCrypto 與 SwiftData 建置、包裝檔完整檔案保護、舊 Keychain 金鑰在成功遷移後移除，以及完整 App 備份還原。
 5. 背景畫面預覽應遮蔽內容。Apple 平台尚未在此 Linux 開發環境編譯或執行，不應未驗證即發佈。
-6. Windows：右鍵刪除日記、刪除體重時不應鎖定，取消或按 Esc 不應刪除；修改 `resources/app.asar` 任一 byte 後，App 應拒絕啟動；以 `--remote-debugging-port=9222` 啟動應直接結束。
-7. iPad：讓一篇記錄無法解密（例如還原不完整的備份），確認該篇為唯讀，且原本的密文沒有被改寫。
+6. Windows：右鍵刪除日記或刪除體重時不應鎖定；在刪除對話框內連按 Tab／Shift+Tab 也不應鎖定；取消或按 Esc 不應刪除。修改 `resources/app.asar` 任一 byte 後，App 應拒絕啟動（Linux 不檢查 ASAR 完整性，必須在 Windows 上驗證）。以 `--remote-debugging-port=9222` 啟動應直接結束，改名為 `electron.exe` 後也一樣。
+7. iPad：讓一筆記錄無法解密（例如資料庫與 `diary-password-key-v2.json` 來自不同備份），確認解鎖失敗並顯示「有記錄無法解密」而不是密碼錯誤，且資料庫中的密文沒有被改寫。放回成對的檔案後，應能正常解鎖。

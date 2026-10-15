@@ -6,6 +6,9 @@ const { randomBytes } = require('node:crypto');
 const vault = require('./vault');
 const indexPath = path.join(__dirname, 'app', 'index.html');
 const trustedPage = pathToFileURL(indexPath).href;
+// Only `electron .` sets defaultApp. Unlike app.isPackaged it does not depend on the executable's name, and the
+// OnlyLoadAppFromAsar fuse keeps a renamed packaged build from loading Electron's default app.
+const developing = process.defaultApp === true;
 let mainWindow, session, accepting = false, epoch = 0, timer, queue = Promise.resolve();
 let failures = 0, retryAt = 0, quitting = false;
 const enqueue = fn => { const next = queue.then(fn); queue = next.catch(() => {}); return next; };
@@ -86,7 +89,7 @@ ipcMain.handle('diary:lock', event => { trusted(event); return lock(); });
 ipcMain.on('diary:activity', event => { trusted(event); activity(); });
 function createWindow() {
   mainWindow = new BrowserWindow({ width: 1100, height: 760, minWidth: 720, minHeight: 520, title: '日記', backgroundColor: '#fffaf0', autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: !app.isPackaged, preload: path.join(__dirname, 'preload.js') } });
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: developing, preload: path.join(__dirname, 'preload.js') } });
   // Electron grants web permissions by default; the diary needs none (camera, microphone, notifications, devices, …).
   const browserSession = mainWindow.webContents.session;
   browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -102,7 +105,7 @@ function createWindow() {
   mainWindow.loadFile(indexPath);
 }
 // Fuses disable Node's --inspect; Chromium's remote debugging would still expose the unlocked page.
-if (app.isPackaged && ['remote-debugging-port', 'remote-debugging-pipe'].some(name => app.commandLine.hasSwitch(name))) { app.exit(1); }
+if (!developing && ['remote-debugging-port', 'remote-debugging-pipe'].some(name => app.commandLine.hasSwitch(name))) { app.exit(1); }
 else if (!app.requestSingleInstanceLock()) { app.quit(); }
 else {
   app.whenReady().then(() => {

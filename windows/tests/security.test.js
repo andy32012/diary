@@ -53,13 +53,14 @@ test('atomic writes replace file without leaving temporary files; failed rename 
     assert.deepEqual((await fs.readdir(dir)).sort(), ['directory', 'vault']);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
-async function harness(dir, { packaged = false, switches = [] } = {}) {
+async function harness(dir, { dev = false, switches = [] } = {}) {
   const handles = new Map(), listeners = new Map(), permissions = {};
   const app = new EventEmitter();
   let exitCode = null;
   app.whenReady = () => Promise.resolve(); app.getPath = () => dir;
   app.requestSingleInstanceLock = () => true; app.quit = () => {};
-  app.isPackaged = packaged; app.commandLine = { hasSwitch: name => switches.includes(name) };
+  // A renamed packaged executable reports isPackaged=false; the app must not rely on it.
+  app.isPackaged = false; app.commandLine = { hasSwitch: name => switches.includes(name) };
   app.exit = code => { exitCode = code; };
   let win;
   class Window extends EventEmitter {
@@ -84,37 +85,37 @@ async function harness(dir, { packaged = false, switches = [] } = {}) {
       decryptStringAsync: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) } };
   vm.runInNewContext(await fs.readFile(path.resolve(__dirname, '../main.js'), 'utf8'), {
     require: name => name === 'electron' ? electron : name === './vault' ? vault : require(name),
-    __dirname: path.resolve(__dirname, '..'), process, Buffer, setTimeout, clearTimeout,
+    __dirname: path.resolve(__dirname, '..'), process: Object.create(process, { defaultApp: { value: dev || undefined } }), Buffer, setTimeout, clearTimeout,
   });
   await new Promise(resolve => setImmediate(resolve));
   const event = win && { sender: win.webContents, senderFrame: win.webContents.mainFrame };
   return { win, event, handles, permissions, exitCode, call: (name, ...args) => Promise.resolve().then(() => handles.get(`diary:${name}`)(event, ...args)) };
 }
-test('window denies every web permission; packaged builds disable DevTools and refuse remote debugging', async () => {
+test('window denies every web permission; shipped builds disable DevTools and refuse remote debugging', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-hardening-'));
   try {
     const h = await harness(dir);
-    let granted = null;
-    h.permissions.request(h.win.webContents, 'media', value => { granted = value; }, {});
-    assert.equal(granted, false);
-    for (const permission of ['media', 'notifications', 'clipboard-read', 'hid']) {
-      assert.equal(h.permissions.check(h.win.webContents, permission, 'file://', {}), false);
+    const permissions = ['media', 'notifications', 'geolocation', 'clipboard-read', 'clipboard-sanitized-write',
+      'display-capture', 'hid', 'serial', 'usb', 'fullscreen', 'openExternal', 'unknown'];
+    for (const permission of permissions) {
+      const answers = [];
+      h.permissions.request(h.win.webContents, permission, value => answers.push(value), {});
+      assert.deepEqual(answers, [false], permission);
+      assert.equal(h.permissions.check(h.win.webContents, permission, 'file://', {}), false, permission);
     }
-    assert.equal(h.permissions.device({ deviceType: 'usb', origin: 'file://' }), false);
+    for (const deviceType of ['hid', 'serial', 'usb']) assert.equal(h.permissions.device({ deviceType, origin: 'file://' }), false);
     const prefs = h.win.options.webPreferences;
-    assert.deepEqual([prefs.contextIsolation, prefs.nodeIntegration, prefs.sandbox], [true, false, true]);
-    assert.equal(prefs.devTools, true);
-    const packaged = await harness(dir, { packaged: true });
-    assert.equal(packaged.win.options.webPreferences.devTools, false);
-    assert.equal(packaged.exitCode, null);
+    assert.deepEqual([prefs.contextIsolation, prefs.nodeIntegration, prefs.sandbox, prefs.devTools], [true, false, true, false]);
+    assert.equal(h.exitCode, null);
     for (const name of ['remote-debugging-port', 'remote-debugging-pipe']) {
-      const debug = await harness(dir, { packaged: true, switches: [name] });
+      const debug = await harness(dir, { switches: [name] });
       assert.equal(debug.exitCode, 1);
       assert.equal(debug.win, undefined);
       await assert.rejects(Promise.resolve().then(() => debug.handles.get('diary:status')({ sender: {}, senderFrame: {} })), /不允許/);
     }
-    const dev = await harness(dir, { switches: ['remote-debugging-port'] });
-    assert.equal(dev.exitCode, null); assert.ok(dev.win);
+    // `electron .` during development keeps DevTools and debugging switches.
+    const dev = await harness(dir, { dev: true, switches: ['remote-debugging-port'] });
+    assert.equal(dev.exitCode, null); assert.equal(dev.win.options.webPreferences.devTools, true);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 test('package config keeps hardening fuses and ships only app files', async () => {
@@ -125,6 +126,10 @@ test('package config keeps hardening fuses and ships only app files', async () =
   });
   assert.notEqual(pkg.build.asar, false);
   assert.deepEqual(pkg.build.files, ['main.js', 'preload.js', 'vault.js', 'app/**']);
+  // `npm audit fix --force` proposes electron-builder 26.5.0, which brings back the critical node-tar advisories.
+  const lock = JSON.parse(await fs.readFile(path.resolve(__dirname, '../package-lock.json'), 'utf8'));
+  const [major, minor] = lock.packages['node_modules/electron-builder'].version.split('.').map(Number);
+  assert.ok(major > 26 || (major === 26 && minor >= 15), `electron-builder ${major}.${minor} is older than 26.15`);
 });
 test('main process enforces authentication, blocks untrusted frames and serializes saves before lock', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-main-'));
@@ -184,6 +189,7 @@ async function renderer({ runTimers = false } = {}) {
       addEventListener(type, cb) { this.listeners.set(type, cb); },
       appendChild() {}, replaceChildren() { this.textContent = ''; this.innerHTML = ''; },
       showModal() { if (this.open) throw Error('dialog already open'); this.open = true; },
+      focus() { document.activeElement = this; },
       // Like HTMLDialogElement, the close event is dispatched after close() returns.
       close() { this.open = false; const cb = this.listeners.get('close'); if (cb) setImmediate(cb); },
     });
@@ -214,7 +220,7 @@ async function renderer({ runTimers = false } = {}) {
     const submit = element('vaultForm').listeners.get('submit')({ preventDefault() {} });
     state.resolveUnlock(plaintext); await submit;
   }
-  return { element, events, windowEvents, saves, state, unlock };
+  return { element, document, events, windowEvents, saves, state, unlock };
 }
 const settle = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
 test('renderer clears diary DOM on lock and ignores unlock response after backgrounding', async () => {
@@ -278,6 +284,32 @@ test('deleting uses the in-page dialog; cancel, Esc and locking keep the data', 
   assert.equal(saves.at(-1).weights.length, 1);
   pending = weightClick(); element('confirmOk').onclick(); await pending; await settle();
   assert.deepEqual(saves.at(-1).weights, []);
+});
+test('Tab stays inside the delete dialog and shortcuts are ignored while it is open', async () => {
+  const { element, document, events, unlock } = await renderer({ runTimers: true });
+  await unlock();
+  const dialog = element('confirmDialog'), cancel = element('confirmCancel'), ok = element('confirmOk');
+  // Returns whether the handler called preventDefault().
+  const press = (handler, key, modifiers = {}) => {
+    let prevented = false;
+    handler({ key, ...modifiers, preventDefault() { prevented = true; } });
+    return prevented;
+  };
+  const tab = shiftKey => press(dialog.listeners.get('keydown'), 'Tab', { shiftKey });
+  const pending = element('wList').listeners.get('click')({ target: { closest: () => ({ dataset: { date: '2026-10-14' } }) } });
+  cancel.focus();
+  // Leaving the last button would hand focus to the window frame and lock the diary.
+  assert.equal(tab(false), true); assert.equal(document.activeElement, ok);
+  assert.equal(tab(false), true); assert.equal(document.activeElement, cancel);
+  assert.equal(tab(true), true); assert.equal(document.activeElement, ok);
+  assert.equal(tab(true), true); assert.equal(document.activeElement, cancel);
+  dialog.focus(); assert.equal(tab(true), true); assert.equal(document.activeElement, ok);   // after a backdrop click
+  dialog.focus(); assert.equal(tab(false), true); assert.equal(document.activeElement, cancel);
+  assert.equal(press(dialog.listeners.get('keydown'), 'Enter'), false);
+  const shortcut = () => press(events.get('keydown'), 'n', { ctrlKey: true });
+  assert.equal(shortcut(), false);
+  cancel.onclick(); await pending;
+  assert.equal(shortcut(), true);
 });
 test('a newer confirmation is not cancelled by the previous dialog close event', async () => {
   const { element, saves, unlock } = await renderer({ runTimers: true });
