@@ -24,9 +24,27 @@ function readLegacyArray(key) {
   if (!Array.isArray(value)) throw new Error('舊日記資料格式錯誤。');
   return value;
 }
+let pendingConfirm = null;
+function settleConfirm(ok) {
+  const resolve = pendingConfirm; pendingConfirm = null;
+  if ($('confirmDialog').open) $('confirmDialog').close();
+  resolve?.(ok);
+}
+// In-page dialog: a native confirm() takes focus from the window, and losing focus locks the diary.
+function confirmAction(message) {
+  settleConfirm(false);
+  $('confirmMessage').textContent = message;
+  $('confirmDialog').showModal();
+  return new Promise(resolve => { pendingConfirm = resolve; });
+}
+$('confirmOk').onclick = () => settleConfirm(true);
+$('confirmCancel').onclick = () => settleConfirm(false);
+// Esc closes the dialog without a button; a newer dialog may already be open by the time this fires.
+$('confirmDialog').addEventListener('close', () => { if (!$('confirmDialog').open) settleConfirm(false); });
 function clearPrivateView() {
   storageReady = false;
   viewEpoch++;
+  settleConfirm(false);
   entries = []; weights = []; selectedId = null;
   for (const id of ['body', 'search', 'wKg', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
   for (const id of ['cards', 'grid', 'wList', 'wStats', 'chart', 'edDate', 'count']) $(id).replaceChildren();
@@ -148,12 +166,12 @@ $('cards').addEventListener('click', ev => {
   const card = ev.target.closest('.card');
   if (card) select(Number(card.dataset.id));
 });
-$('cards').addEventListener('contextmenu', ev => {
+$('cards').addEventListener('contextmenu', async ev => {
   const card = ev.target.closest('.card');
-  const attempt = viewEpoch;
-  if (!card || !confirm('要刪除這篇日記嗎？') || !storageReady || attempt !== viewEpoch) return;
+  if (!card || !storageReady) return;
   ev.preventDefault();
-  const id = Number(card.dataset.id);
+  const attempt = viewEpoch, id = Number(card.dataset.id);
+  if (!await confirmAction('要刪除這篇日記嗎？') || !storageReady || attempt !== viewEpoch) return;
   card.classList.add('leaving');
   setTimeout(() => {
     if (!storageReady || attempt !== viewEpoch) return;
@@ -238,11 +256,12 @@ $('wSave').onclick = () => {
 };
 $('wKg').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('wSave').click(); });
 
-$('wList').addEventListener('click', ev => {
+$('wList').addEventListener('click', async ev => {
   const del = ev.target.closest('.del');
-  const attempt = viewEpoch;
-  if (!del || !confirm('要刪除這筆體重嗎？') || !storageReady || attempt !== viewEpoch) return;
-  weights = weights.filter(w => w.date !== del.dataset.date);
+  if (!del || !storageReady) return;
+  const attempt = viewEpoch, date = del.dataset.date;
+  if (!await confirmAction('要刪除這筆體重嗎？') || !storageReady || attempt !== viewEpoch) return;
+  weights = weights.filter(w => w.date !== date);
   saveWeights(); renderWeights();
 });
 
@@ -425,7 +444,7 @@ $('done').onclick = () => {
 };
 
 document.addEventListener('keydown', ev => {
-  if (!storageReady) return;
+  if (!storageReady || $('confirmDialog').open) return;
   if (ev.ctrlKey && ev.key.toLowerCase() === 'n') { ev.preventDefault(); addEntry(); }
   if (ev.ctrlKey && ev.key === 'Enter' && selected()) $('done').click();
 });

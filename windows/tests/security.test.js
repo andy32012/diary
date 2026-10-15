@@ -53,19 +53,27 @@ test('atomic writes replace file without leaving temporary files; failed rename 
     assert.deepEqual((await fs.readdir(dir)).sort(), ['directory', 'vault']);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
-async function harness(dir) {
-  const handles = new Map(), listeners = new Map();
+async function harness(dir, { packaged = false, switches = [] } = {}) {
+  const handles = new Map(), listeners = new Map(), permissions = {};
   const app = new EventEmitter();
+  let exitCode = null;
   app.whenReady = () => Promise.resolve(); app.getPath = () => dir;
   app.requestSingleInstanceLock = () => true; app.quit = () => {};
+  app.isPackaged = packaged; app.commandLine = { hasSwitch: name => switches.includes(name) };
+  app.exit = code => { exitCode = code; };
   let win;
   class Window extends EventEmitter {
-    constructor() {
-      super(); win = this; this.focused = true;
+    constructor(options) {
+      super(); win = this; this.focused = true; this.options = options;
       this.webContents = new EventEmitter();
       this.webContents.mainFrame = { url: require('node:url').pathToFileURL(path.resolve(__dirname, '../app/index.html')).href };
       this.webContents.send = () => {};
       this.webContents.setWindowOpenHandler = () => {};
+      this.webContents.session = {
+        setPermissionRequestHandler: handler => { permissions.request = handler; },
+        setPermissionCheckHandler: handler => { permissions.check = handler; },
+        setDevicePermissionHandler: handler => { permissions.device = handler; },
+      };
     }
     isFocused() { return this.focused; } isDestroyed() { return false; }
     loadFile() {} show() {} focus() { this.focused = true; }
@@ -79,9 +87,45 @@ async function harness(dir) {
     __dirname: path.resolve(__dirname, '..'), process, Buffer, setTimeout, clearTimeout,
   });
   await new Promise(resolve => setImmediate(resolve));
-  const event = { sender: win.webContents, senderFrame: win.webContents.mainFrame };
-  return { win, event, handles, call: (name, ...args) => Promise.resolve().then(() => handles.get(`diary:${name}`)(event, ...args)) };
+  const event = win && { sender: win.webContents, senderFrame: win.webContents.mainFrame };
+  return { win, event, handles, permissions, exitCode, call: (name, ...args) => Promise.resolve().then(() => handles.get(`diary:${name}`)(event, ...args)) };
 }
+test('window denies every web permission; packaged builds disable DevTools and refuse remote debugging', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-hardening-'));
+  try {
+    const h = await harness(dir);
+    let granted = null;
+    h.permissions.request(h.win.webContents, 'media', value => { granted = value; }, {});
+    assert.equal(granted, false);
+    for (const permission of ['media', 'notifications', 'clipboard-read', 'hid']) {
+      assert.equal(h.permissions.check(h.win.webContents, permission, 'file://', {}), false);
+    }
+    assert.equal(h.permissions.device({ deviceType: 'usb', origin: 'file://' }), false);
+    const prefs = h.win.options.webPreferences;
+    assert.deepEqual([prefs.contextIsolation, prefs.nodeIntegration, prefs.sandbox], [true, false, true]);
+    assert.equal(prefs.devTools, true);
+    const packaged = await harness(dir, { packaged: true });
+    assert.equal(packaged.win.options.webPreferences.devTools, false);
+    assert.equal(packaged.exitCode, null);
+    for (const name of ['remote-debugging-port', 'remote-debugging-pipe']) {
+      const debug = await harness(dir, { packaged: true, switches: [name] });
+      assert.equal(debug.exitCode, 1);
+      assert.equal(debug.win, undefined);
+      await assert.rejects(Promise.resolve().then(() => debug.handles.get('diary:status')({ sender: {}, senderFrame: {} })), /不允許/);
+    }
+    const dev = await harness(dir, { switches: ['remote-debugging-port'] });
+    assert.equal(dev.exitCode, null); assert.ok(dev.win);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+test('package config keeps hardening fuses and ships only app files', async () => {
+  const pkg = JSON.parse(await fs.readFile(path.resolve(__dirname, '../package.json'), 'utf8'));
+  assert.deepEqual(pkg.build.electronFuses, {
+    runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false,
+    enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: true, onlyLoadAppFromAsar: true,
+  });
+  assert.notEqual(pkg.build.asar, false);
+  assert.deepEqual(pkg.build.files, ['main.js', 'preload.js', 'vault.js', 'app/**']);
+});
 test('main process enforces authentication, blocks untrusted frames and serializes saves before lock', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-main-'));
   const h = await harness(dir);
@@ -132,17 +176,20 @@ test('backgrounding during expensive unlock does not restore a session', async (
     await assert.rejects(h.call('save', plaintext), /鎖定/);
   } finally { await h.call('lock'); await fs.rm(dir, { recursive: true, force: true }); }
 });
-test('renderer clears diary DOM on lock and ignores unlock response after backgrounding', async () => {
-  const elements = new Map(), events = new Map(), windowEvents = new Map();
+async function renderer({ runTimers = false } = {}) {
+  const elements = new Map(), events = new Map(), windowEvents = new Map(), saves = [];
   function element(id) {
-    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', innerHTML: '', disabled: false,
+    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', innerHTML: '', disabled: false, open: false,
       style: {}, dataset: {}, listeners: new Map(), classList: { add() {}, remove() {}, toggle() {} },
       addEventListener(type, cb) { this.listeners.set(type, cb); },
       appendChild() {}, replaceChildren() { this.textContent = ''; this.innerHTML = ''; },
+      showModal() { if (this.open) throw Error('dialog already open'); this.open = true; },
+      // Like HTMLDialogElement, the close event is dispatched after close() returns.
+      close() { this.open = false; const cb = this.listeners.get('close'); if (cb) setImmediate(cb); },
     });
     return elements.get(id);
   }
-  let onLocked, resolveUnlock, lockCalls = 0;
+  const state = { onLocked: null, resolveUnlock: null, lockCalls: 0 };
   const document = {
     getElementById: element,
     querySelector: element,
@@ -152,14 +199,28 @@ test('renderer clears diary DOM on lock and ignores unlock response after backgr
   };
   const window = { addEventListener: (type, cb) => windowEvents.set(type, cb), diaryCrypto: {
     status: async () => ({ setup: false, legacyLocal: false }),
-    unlock: () => new Promise(resolve => { resolveUnlock = resolve; }),
-    save: async () => {}, activity() {}, onLocked: cb => { onLocked = cb; },
-    lock: async () => { lockCalls++; onLocked(); },
+    unlock: () => new Promise(resolve => { state.resolveUnlock = resolve; }),
+    save: async text => { saves.push(JSON.parse(text)); }, activity() {}, onLocked: cb => { state.onLocked = cb; },
+    lock: async () => { state.lockCalls++; state.onLocked(); },
   } };
   vm.runInNewContext(await fs.readFile(path.resolve(__dirname, '../app/app.js'), 'utf8'), {
-    document, window, localStorage: { getItem: () => null, removeItem() {} }, setTimeout: () => 0, confirm: () => false,
+    document, window, localStorage: { getItem: () => null, removeItem() {} },
+    setTimeout: runTimers ? (cb => { setImmediate(cb); return 0; }) : () => 0,
+    confirm: () => { throw Error('native confirm() blurs the window and locks the diary'); },
   });
   await new Promise(resolve => setImmediate(resolve));
+  async function unlock() {
+    element('vaultPassword').value = password;
+    const submit = element('vaultForm').listeners.get('submit')({ preventDefault() {} });
+    state.resolveUnlock(plaintext); await submit;
+  }
+  return { element, events, windowEvents, saves, state, unlock };
+}
+const settle = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+test('renderer clears diary DOM on lock and ignores unlock response after backgrounding', async () => {
+  const { element, windowEvents, state } = await renderer();
+  const onLocked = () => state.onLocked();
+  const resolveUnlock = text => state.resolveUnlock(text);
   element('vaultPassword').value = password;
   const first = element('vaultForm').listeners.get('submit')({ preventDefault() {} });
   resolveUnlock(plaintext); await first;
@@ -175,5 +236,59 @@ test('renderer clears diary DOM on lock and ignores unlock response after backgr
   windowEvents.get('blur')(); resolveUnlock(plaintext); await pending;
   assert.equal(element('cards').innerHTML, '');
   assert.equal(element('main').inert, true);
-  assert.ok(lockCalls >= 2);
+  assert.ok(state.lockCalls >= 2);
+});
+test('deleting uses the in-page dialog; cancel, Esc and locking keep the data', async () => {
+  const { element, saves, state, unlock } = await renderer({ runTimers: true });
+  await unlock();
+  const dialog = element('confirmDialog');
+  const card = { dataset: { id: '1' }, classList: { add() {} } };
+  const rightClick = () => {
+    let prevented = false;
+    const done = element('cards').listeners.get('contextmenu')({ target: { closest: () => card }, preventDefault() { prevented = true; } });
+    return { done, prevented: () => prevented };
+  };
+
+  let click = rightClick();
+  assert.equal(click.prevented(), true); assert.equal(dialog.open, true);
+  assert.match(element('confirmMessage').textContent, /刪除這篇日記/);
+  element('confirmCancel').onclick(); await click.done; await settle();
+  assert.equal(dialog.open, false); assert.equal(saves.length, 0);
+
+  // A browser-initiated close (Esc) dispatches only the close event.
+  click = rightClick(); dialog.close(); await click.done; await settle();
+  assert.equal(saves.length, 0);
+
+  // Locking while the dialog is open cancels it; the stale confirmation cannot delete later.
+  click = rightClick(); state.onLocked(); await click.done; await settle();
+  assert.equal(dialog.open, false); assert.equal(saves.length, 0);
+  element('confirmOk').onclick(); await settle();
+  assert.equal(saves.length, 0);
+
+  await unlock();
+  click = rightClick(); element('confirmOk').onclick(); await click.done; await settle();
+  assert.equal(dialog.open, false);
+  assert.deepEqual(saves.at(-1).entries, []);
+  assert.equal(saves.at(-1).weights.length, 1);
+
+  const del = { dataset: { date: '2026-10-14' } };
+  const weightClick = () => element('wList').listeners.get('click')({ target: { closest: () => del } });
+  let pending = weightClick(); assert.match(element('confirmMessage').textContent, /刪除這筆體重/);
+  element('confirmCancel').onclick(); await pending; await settle();
+  assert.equal(saves.at(-1).weights.length, 1);
+  pending = weightClick(); element('confirmOk').onclick(); await pending; await settle();
+  assert.deepEqual(saves.at(-1).weights, []);
+});
+test('a newer confirmation is not cancelled by the previous dialog close event', async () => {
+  const { element, saves, unlock } = await renderer({ runTimers: true });
+  await unlock();
+  const del = { dataset: { date: '2026-10-14' } };
+  const weightClick = () => element('wList').listeners.get('click')({ target: { closest: () => del } });
+  const first = weightClick();
+  element('confirmCancel').onclick();
+  const second = weightClick();          // opens before the first close event is dispatched
+  await first; await settle();
+  assert.equal(element('confirmDialog').open, true);
+  element('confirmOk').onclick(); await second; await settle();
+  assert.deepEqual(saves.at(-1).weights, []);
 });

@@ -8,6 +8,8 @@ struct EditorView: View {
     @State private var selectedMood = 3
     @State private var bodyEncryptionFailed = false
     @State private var moodEncryptionFailed = false
+    /// Undecryptable entries stay read-only so an edit cannot overwrite the only copy of the ciphertext.
+    @State private var decryptionFailed = false
     @State private var showEncryptionError = false
     @State private var encryptionError = ""
     @FocusState private var focused: Bool
@@ -20,7 +22,9 @@ struct EditorView: View {
 
             VStack(alignment: .leading, spacing: 20) {
                 MoodPicker(mood: $selectedMood)
+                    .disabled(decryptionFailed)
                     .onChange(of: selectedMood) { _, value in
+                        guard !decryptionFailed else { return }
                         do {
                             try entry.encryptMood(value)
                             moodEncryptionFailed = false
@@ -36,9 +40,10 @@ struct EditorView: View {
                     .focused($focused)
                     .padding(16)
                     .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(.white.opacity(0.85)))
+                    .disabled(decryptionFailed)
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty {
-                            Text("今天發生了什麼事呢？")
+                            Text(decryptionFailed ? "這篇日記無法解密，已設為唯讀以保留原始資料。" : "今天發生了什麼事呢？")
                                 .font(.system(.title3, design: .rounded))
                                 .foregroundStyle(.secondary)
                                 .padding(24)
@@ -46,6 +51,7 @@ struct EditorView: View {
                         }
                     }
                     .onChange(of: draft) { _, value in
+                        guard !decryptionFailed else { return }
                         do {
                             try entry.encryptBody(value)
                             bodyEncryptionFailed = false
@@ -90,6 +96,7 @@ struct EditorView: View {
         .sensoryFeedback(.selection, trigger: selectedMood)
         .onAppear {
             guard let body = entry.bodyText, let mood = entry.moodValue else {
+                decryptionFailed = true
                 encryptionError = "無法解密這篇日記。原始資料仍保留，請重新解鎖，或檢查備份中的加密金鑰檔。"
                 showEncryptionError = true
                 bodyEncryptionFailed = true

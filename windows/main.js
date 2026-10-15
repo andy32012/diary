@@ -86,7 +86,12 @@ ipcMain.handle('diary:lock', event => { trusted(event); return lock(); });
 ipcMain.on('diary:activity', event => { trusted(event); activity(); });
 function createWindow() {
   mainWindow = new BrowserWindow({ width: 1100, height: 760, minWidth: 720, minHeight: 520, title: '日記', backgroundColor: '#fffaf0', autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, 'preload.js') } });
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: !app.isPackaged, preload: path.join(__dirname, 'preload.js') } });
+  // Electron grants web permissions by default; the diary needs none (camera, microphone, notifications, devices, …).
+  const browserSession = mainWindow.webContents.session;
+  browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  browserSession.setPermissionCheckHandler(() => false);
+  browserSession.setDevicePermissionHandler(() => false);
   Menu.setApplicationMenu(null);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => { if (url !== trustedPage) event.preventDefault(); });
@@ -96,7 +101,9 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; void lock(); });
   mainWindow.loadFile(indexPath);
 }
-if (!app.requestSingleInstanceLock()) { app.quit(); }
+// Fuses disable Node's --inspect; Chromium's remote debugging would still expose the unlocked page.
+if (app.isPackaged && ['remote-debugging-port', 'remote-debugging-pipe'].some(name => app.commandLine.hasSwitch(name))) { app.exit(1); }
+else if (!app.requestSingleInstanceLock()) { app.quit(); }
 else {
   app.whenReady().then(() => {
     powerMonitor.on('lock-screen', () => { void lock(); });
