@@ -65,7 +65,7 @@ function clearPrivateView() {
   viewEpoch++;
   settleConfirm(false);
   entries = []; weights = []; selectedId = null; shownIds = '';
-  for (const id of ['body', 'search', 'wKg', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
+  for (const id of ['body', 'search', 'wKg', 'wDate', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
   for (const id of ['cards', 'grid', 'wList', 'wStats', 'chart', 'edDate', 'count']) $(id).replaceChildren();
   $('editor').classList.add('hidden');
   $('secureGate').classList.remove('hidden');
