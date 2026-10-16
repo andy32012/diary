@@ -45,6 +45,9 @@ h1 { font-size: 28px; }
 .card:active { transform: scale(.94); }
 .card.sel { border-color: var(--pink-deep); background: #fff; transform: scale(1.02); }
 .card.leaving { animation: shrink .35s ease-in forwards; }
+/* Re-renders that keep the same cards must not replay the entrance; off-screen cards skip layout and paint. */
+.cards.settled .card:not(.leaving) { animation: none; }
+.card { content-visibility: auto; contain-intrinsic-size: auto 104px; }
 @keyframes pop { from { transform: scale(.6); opacity: 0; } }
 @keyframes shrink { to { transform: scale(.4); opacity: 0; } }
 .face { width: 54px; height: 54px; flex: none; border-radius: 50%; display: grid; place-items: center; font-size: 32px;

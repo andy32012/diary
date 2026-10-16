@@ -18,6 +18,8 @@ struct DiaryApp: App {
                 }
             }
             .tint(Theme.pinkDeep)
+            // Theme is a fixed light palette; in Dark Mode system text turned white on the white editor card.
+            .preferredColorScheme(.light)
             .task {
                 try? await Task.sleep(for: .seconds(1.6))
                 withAnimation(.easeInOut(duration: 0.5)) { showSplash = false }

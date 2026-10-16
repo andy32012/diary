@@ -53,7 +53,7 @@ test('atomic writes replace file without leaving temporary files; failed rename 
     assert.deepEqual((await fs.readdir(dir)).sort(), ['directory', 'vault']);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
-async function harness(dir, { dev = false, switches = [] } = {}) {
+async function harness(dir, { dev = false, switches = [], appDir = path.resolve(__dirname, '..'), frameURL } = {}) {
   const handles = new Map(), listeners = new Map(), permissions = {};
   const app = new EventEmitter();
   let exitCode = null;
@@ -67,7 +67,7 @@ async function harness(dir, { dev = false, switches = [] } = {}) {
     constructor(options) {
       super(); win = this; this.focused = true; this.options = options;
       this.webContents = new EventEmitter();
-      this.webContents.mainFrame = { url: require('node:url').pathToFileURL(path.resolve(__dirname, '../app/index.html')).href };
+      this.webContents.mainFrame = { url: frameURL ?? require('node:url').pathToFileURL(path.join(appDir, 'app', 'index.html')).href };
       this.webContents.send = () => {};
       this.webContents.setWindowOpenHandler = () => {};
       this.webContents.session = {
@@ -77,7 +77,7 @@ async function harness(dir, { dev = false, switches = [] } = {}) {
       };
     }
     isFocused() { return this.focused; } isDestroyed() { return false; }
-    loadFile() {} show() {} focus() { this.focused = true; }
+    loadURL(url) { this.loadedURL = url; } show() {} focus() { this.focused = true; }
   }
   const electron = { app, BrowserWindow: Window, Menu: { setApplicationMenu() {} },
     ipcMain: { handle: (k, v) => handles.set(k, v), on: (k, v) => listeners.set(k, v) },
@@ -85,7 +85,7 @@ async function harness(dir, { dev = false, switches = [] } = {}) {
       decryptStringAsync: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) } };
   vm.runInNewContext(await fs.readFile(path.resolve(__dirname, '../main.js'), 'utf8'), {
     require: name => name === 'electron' ? electron : name === './vault' ? vault : require(name),
-    __dirname: path.resolve(__dirname, '..'), process: Object.create(process, { defaultApp: { value: dev || undefined } }), Buffer, setTimeout, clearTimeout,
+    __dirname: appDir, process: Object.create(process, { defaultApp: { value: dev || undefined } }), Buffer, setTimeout, clearTimeout,
   });
   await new Promise(resolve => setImmediate(resolve));
   const event = win && { sender: win.webContents, senderFrame: win.webContents.mainFrame };
@@ -184,7 +184,9 @@ test('backgrounding during expensive unlock does not restore a session', async (
 async function renderer({ runTimers = false } = {}) {
   const elements = new Map(), events = new Map(), windowEvents = new Map(), saves = [];
   function element(id) {
-    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', innerHTML: '', disabled: false, open: false,
+    if (!elements.has(id)) elements.set(id, { id, value: '', textContent: '', innerHTML: '', disabled: false, open: false,
+      // Descendant lookups return stable stubs keyed by selector, e.g. element('cards .card[data-id="1"] .txt').
+      querySelector(selector) { return element(`${this.id} ${selector}`); },
       style: {}, dataset: {}, listeners: new Map(), classList: { add() {}, remove() {}, toggle() {} },
       addEventListener(type, cb) { this.listeners.set(type, cb); },
       appendChild() {}, replaceChildren() { this.textContent = ''; this.innerHTML = ''; },
@@ -195,7 +197,7 @@ async function renderer({ runTimers = false } = {}) {
     });
     return elements.get(id);
   }
-  const state = { onLocked: null, resolveUnlock: null, lockCalls: 0 };
+  const state = { onLocked: null, resolveUnlock: null, rejectUnlock: null, saveError: null, lockCalls: 0 };
   const document = {
     getElementById: element,
     querySelector: element,
@@ -205,8 +207,9 @@ async function renderer({ runTimers = false } = {}) {
   };
   const window = { addEventListener: (type, cb) => windowEvents.set(type, cb), diaryCrypto: {
     status: async () => ({ setup: false, legacyLocal: false }),
-    unlock: () => new Promise(resolve => { state.resolveUnlock = resolve; }),
-    save: async text => { saves.push(JSON.parse(text)); }, activity() {}, onLocked: cb => { state.onLocked = cb; },
+    unlock: () => new Promise((resolve, reject) => { state.resolveUnlock = resolve; state.rejectUnlock = reject; }),
+    save: async text => { if (state.saveError) throw state.saveError; saves.push(JSON.parse(text)); },
+    activity() {}, onLocked: cb => { state.onLocked = cb; },
     lock: async () => { state.lockCalls++; state.onLocked(); },
   } };
   vm.runInNewContext(await fs.readFile(path.resolve(__dirname, '../app/app.js'), 'utf8'), {
@@ -323,4 +326,94 @@ test('a newer confirmation is not cancelled by the previous dialog close event',
   assert.equal(element('confirmDialog').open, true);
   element('confirmOk').onclick(); await second; await settle();
   assert.deepEqual(saves.at(-1).weights, []);
+});
+test('trusted page check survives ~ % [ ] in the install path and either URL escaping', async () => {
+  const { pathToFileURL } = require('node:url');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-paths-'));
+  try {
+    // e.g. the portable build extracted under an 8.3 %TEMP% such as C:\Users\ADMINI~1\AppData\Local\Temp
+    const appDir = path.join(dir, 'ADMINI~1', '100%', 'x[1]', 'resources', 'app');
+    const page = pathToFileURL(path.join(appDir, 'app', 'index.html')).href;
+    // Chromium may keep the escapes it was given or show ~ [ ] raw; both name the same file.
+    const raw = page.replace(/%7E/g, '~').replace(/%5B/g, '[').replace(/%5D/g, ']');
+    assert.notEqual(raw, page);
+    for (const frameURL of [page, raw, `${page}?again#top`]) {
+      const h = await harness(dir, { appDir, frameURL });
+      assert.equal(h.win.loadedURL, page);
+      assert.equal((await h.call('status')).setup, true, frameURL);
+    }
+    for (const frameURL of [pathToFileURL(path.join(appDir, 'app', 'other.html')).href, pathToFileURL(path.join(dir, 'index.html')).href,
+      'https://example.com/app/index.html', 'file:///etc/passwd', `${page.slice(0, -'index.html'.length)}..%2Fapp%2Findex.html`, 'not a url']) {
+      const h = await harness(dir, { appDir, frameURL });
+      await assert.rejects(h.call('status'), /不允許/, frameURL);
+    }
+    const h = await harness(dir, { appDir });
+    const navigate = url => { let blocked = false; h.win.webContents.emit('will-navigate', { preventDefault() { blocked = true; } }, url); return blocked; };
+    assert.equal(navigate(raw), false);
+    assert.equal(navigate('https://example.com/'), true);
+    assert.equal(navigate(pathToFileURL(path.join(appDir, 'app', 'other.html')).href), true);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+test('a throttled retry says how long to wait and does not lengthen the wait', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-throttle-'));
+  const h = await harness(dir);
+  try {
+    assert.equal(await h.call('unlock', password, plaintext), plaintext);
+    await h.call('lock');
+    await assert.rejects(h.call('unlock', 'not the right password'), /密碼錯誤/);
+    await assert.rejects(h.call('unlock', password), /請在 1 秒後再試/);
+    await assert.rejects(h.call('unlock', password), /秒後再試/);
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    assert.equal(await h.call('unlock', password), plaintext);
+  } finally { await h.call('lock'); await fs.rm(dir, { recursive: true, force: true }); }
+});
+test('lock screen keeps the unlock or save error instead of the generic locked text', async () => {
+  const { element, state, unlock } = await renderer();
+  const message = () => element('secureGateMessage').textContent;
+  const submit = () => element('vaultForm').listeners.get('submit')({ preventDefault() {} });
+  element('vaultPassword').value = 'not the right password';
+  let attempt = submit();
+  state.rejectUnlock(new Error("Error invoking remote method 'diary:unlock': Error: 密碼錯誤或日記檔案已損壞。"));
+  await attempt; await settle();   // locking re-renders the gate after the error
+  assert.equal(message(), '密碼錯誤或日記檔案已損壞。');
+  element('vaultPassword').value = password;
+  attempt = submit();
+  assert.equal(message(), '正在安全解鎖，請稍候…');
+  state.rejectUnlock(new Error("Error invoking remote method 'diary:unlock': Error: 嘗試過於頻繁，請在 1 秒後再試。"));
+  await attempt; await settle();
+  assert.equal(message(), '嘗試過於頻繁，請在 1 秒後再試。');
+
+  await unlock();
+  state.saveError = new Error("Error invoking remote method 'diary:save': Error: ENOSPC: no space left on device");
+  element('cards').listeners.get('click')({ target: { closest: () => ({ dataset: { id: '1' } }) } });
+  element('body').value = '寫到一半'; element('body').listeners.get('input')();
+  await settle();
+  assert.equal(message(), '無法安全開啟或儲存：ENOSPC: no space left on device');
+  assert.equal(element('main').inert, true);
+});
+test('typing, selecting and changing mood update cards in place instead of rebuilding the list', async () => {
+  const { element, saves, unlock } = await renderer();
+  await unlock();
+  const cards = element('cards');
+  let html = cards.innerHTML, rebuilds = 0;
+  Object.defineProperty(cards, 'innerHTML', { get: () => html, set: value => { rebuilds++; html = value; } });
+  const input = text => { element('body').value = text; element('body').listeners.get('input')(); };
+  const card = selector => element(`cards .card[data-id="1"]${selector}`);
+
+  element('cards').listeners.get('click')({ target: { closest: () => ({ dataset: { id: '1' } }) } });
+  assert.equal(rebuilds, 0); assert.equal(saves.length, 0);   // selecting neither rebuilds nor rewrites the vault
+  input('私人的日記，再多寫一點');
+  assert.equal(rebuilds, 0);
+  assert.equal(card(' .txt').textContent, '私人的日記，再多寫一點');
+  assert.equal(saves.at(-1).entries[0].body, '私人的日記，再多寫一點');
+  element('moods').listeners.get('click')({ target: { closest: () => ({ dataset: { m: '5' } }) } });
+  assert.equal(rebuilds, 0);
+  assert.equal(card(' .face').textContent, '😄'); assert.equal(saves.at(-1).entries[0].mood, 5);
+  input('x'.repeat(5000));
+  assert.equal(card(' .txt').textContent.length, 200);   // the card only shows three lines
+  assert.equal(saves.at(-1).entries[0].body.length, 5000);
+  // With a search active an edit can change which cards match, so the list is rebuilt.
+  element('search').value = 'x';
+  input('x'.repeat(5001));
+  assert.equal(rebuilds, 1); assert.match(html, /x{200}/); assert.doesNotMatch(html, /x{201}/);
 });

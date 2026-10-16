@@ -59,7 +59,7 @@ node --check app/app.js
 node --test tests/security.test.js
 ```
 
-自動測試包含真正的 scrypt/AES-GCM round trip、錯誤密碼、salt/nonce/ciphertext/tag 竄改、寫入失敗、來源驗證、鎖定後存取、排隊儲存、DPAPI 遷移流程、解鎖與背景鎖定競態、renderer 清除明文、權限一律拒絕、非開發模式拒絕遠端偵錯並停用 DevTools、fuse 設定與 electron-builder 版本下限，以及頁面內刪除確認（取消、Esc、鎖定時取消、Tab 不離開對話框、對話框開啟時忽略快捷鍵）。Electron、DPAPI 和 DOM 使用替身；不能當作 Windows 整合測試。
+自動測試包含真正的 scrypt/AES-GCM round trip、錯誤密碼、salt/nonce/ciphertext/tag 竄改、寫入失敗、來源驗證、鎖定後存取、排隊儲存、DPAPI 遷移流程、解鎖與背景鎖定競態、renderer 清除明文、權限一律拒絕、非開發模式拒絕遠端偵錯並停用 DevTools、fuse 設定與 electron-builder 版本下限，頁面內刪除確認（取消、Esc、鎖定時取消、Tab 不離開對話框、對話框開啟時忽略快捷鍵）、安裝路徑含 `~`、`%`、`[ ]` 時的來源驗證、等待期間重試不延長等待、鎖定畫面保留解鎖與儲存錯誤，以及打字、選取、改心情時只更新該張卡片。Electron、DPAPI 和 DOM 使用替身；不能當作 Windows 整合測試。
 
 建置後確認 fuses：
 
@@ -82,3 +82,5 @@ npx @electron/fuses read --app "dist/win-unpacked/日記.exe"
    - 用開發版和 Xcode → Devices 的 Download／Replace Container，把資料庫和另一次獨立設定（另一台裝置，或重新安裝後）產生的 `diary-password-key-v2.json` 配對，並輸入該次設定的密碼。
    - 用除錯版改動某筆 `encryptedBody` 的一個 byte。
    放回成對的檔案後，應能正常解鎖。
+8. Windows：把 `dist/win-unpacked` 放到名稱含 `~`、`%`、`[ ]` 的資料夾（例如 `ADMINI~1`），應能正常設定密碼、解鎖與儲存。打錯密碼時鎖定畫面應顯示「密碼錯誤」，並在等待期間顯示剩餘秒數。
+9. iPad：在深色模式（含「自動」切到深色的晚上）下，日記內文、月曆與鎖定畫面都應清楚可讀。
