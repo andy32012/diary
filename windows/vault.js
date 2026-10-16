@@ -45,7 +45,7 @@ async function open(data, password) {
     const bytes = Buffer.concat([cipher.update(data.subarray(offset + 28, -16)), cipher.final()]);
     try { return { key, salt, text: validate(bytes.toString('utf8')) }; }
     finally { bytes.fill(0); }
-  } catch { key.fill(0); throw Error('密碼錯誤或日記檔案已損壞。'); }
+  } catch { key.fill(0); throw Object.assign(Error('密碼錯誤或日記檔案已損壞。'), { auth: true }); }
 }
 async function read(file) {
   let handle;
@@ -64,7 +64,18 @@ async function write(file, data) {
     handle = await fs.open(tmp, 'wx', 0o600);
     await handle.writeFile(data); await handle.sync(); await handle.close(); handle = null;
     // Same-directory atomic replacement: old vault survives any failure before rename.
-    await fs.rename(tmp, file);
+    await replace(tmp, file);
   } finally { await handle?.close(); await fs.rm(tmp, { force: true }); }
+}
+const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+async function replace(tmp, file) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fs.rename(tmp, file); }
+    catch (error) {
+      // Antivirus and indexers briefly hold freshly written files open on Windows.
+      if (!TRANSIENT.has(error.code) || attempt >= 4) throw error;
+      await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
 }
 module.exports = { MAGIC, LEGACY, validate, keyFrom, seal, open, read, write };

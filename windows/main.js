@@ -15,7 +15,7 @@ function isTrustedPage(url) {
 // OnlyLoadAppFromAsar fuse keeps a renamed packaged build from loading Electron's default app.
 const developing = process.defaultApp === true;
 let mainWindow, session, accepting = false, epoch = 0, timer, queue = Promise.resolve();
-let failures = 0, retryAt = 0, quitting = false;
+let failures = 0, retryAt = 0, quitting = false, pendingText = null, pendingWrite = null;
 const enqueue = fn => { const next = queue.then(fn); queue = next.catch(() => {}); return next; };
 const file = () => path.join(app.getPath('userData'), 'diary-vault.bin');
 function trusted(event) {
@@ -74,7 +74,8 @@ ipcMain.handle('diary:unlock', (event, password, legacyText) => {
       candidate = null; accepting = true; failures = 0; retryAt = 0; activity();
       return text;
     } catch (error) {
-      failures++; retryAt = Date.now() + Math.min(30000, 1000 * 2 ** Math.min(failures - 1, 5));
+      // Only wrong-password results slow down retries; focus loss or I/O errors must not lock the user out.
+      if (error.auth) { failures++; retryAt = Date.now() + Math.min(30000, 1000 * 2 ** Math.min(failures - 1, 5)); }
       throw error;
     } finally { candidate?.key.fill(0); password = null; legacyText = null; }
   });
@@ -82,17 +83,22 @@ ipcMain.handle('diary:unlock', (event, password, legacyText) => {
 ipcMain.handle('diary:save', (event, plaintext) => {
   trusted(event);
   if (!accepting) throw Error('日記已鎖定。');
-  const acceptedEpoch = epoch;
-  return enqueue(async () => {
+  pendingText = plaintext;
+  // Keystrokes arriving before the queued write starts replace its payload, so a burst costs one write.
+  return pendingWrite ??= enqueue(async () => {
+    pendingWrite = null;
+    const text = pendingText; pendingText = null;
     // Saves accepted before lock finish before the queued key destruction.
     if (!session) throw Error('日記已鎖定。');
-    await vault.write(file(), vault.seal(plaintext, session.key, session.salt));
-    plaintext = null;
-    return acceptedEpoch;
+    await vault.write(file(), vault.seal(text, session.key, session.salt));
   });
 });
 ipcMain.handle('diary:lock', event => { trusted(event); return lock(); });
-ipcMain.on('diary:activity', event => { trusted(event); activity(); });
+ipcMain.on('diary:activity', event => {
+  // Exceptions in ipcMain.on listeners are uncaught, so ignore untrusted senders instead of throwing.
+  try { trusted(event); } catch { return; }
+  activity();
+});
 function createWindow() {
   mainWindow = new BrowserWindow({ width: 1100, height: 760, minWidth: 720, minHeight: 520, title: '日記', backgroundColor: '#fffaf0', autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: developing, preload: path.join(__dirname, 'preload.js') } });

@@ -7,7 +7,8 @@
   "author": "hixuanye",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win portable"
+    "build": "electron-builder --win nsis",
+    "build:portable": "electron-builder --win portable"
   },
   "build": {
     "appId": "com.hixuanye.diary",
@@ -22,7 +23,17 @@
       "app/**"
     ],
     "win": {
-      "target": "portable"
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "日記",
+      "runAfterFinish": true
     },
     "electronFuses": {
       "runAsNode": false,
