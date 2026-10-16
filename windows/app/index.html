@@ -65,6 +65,13 @@
 </div>
 
 <button id="lockDiary" class="lock-diary hidden">🔒 鎖定</button>
+<dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmMessage">
+  <p id="confirmMessage"></p>
+  <div class="confirm-actions">
+    <button type="button" id="confirmCancel" autofocus>取消</button>
+    <button type="button" id="confirmOk">刪除</button>
+  </div>
+</dialog>
 <div class="secure-gate" id="secureGate" role="dialog" aria-modal="true" aria-label="解鎖日記">
   <form class="secure-gate-card" id="vaultForm">
     <div class="scale-icon">🔐</div>

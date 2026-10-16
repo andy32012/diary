@@ -1,17 +1,25 @@
 'use strict';
 const { app, BrowserWindow, Menu, ipcMain, safeStorage, powerMonitor } = require('electron');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
+const { pathToFileURL, fileURLToPath } = require('node:url');
 const { randomBytes } = require('node:crypto');
 const vault = require('./vault');
-const indexPath = path.join(__dirname, 'app', 'index.html');
-const trustedPage = pathToFileURL(indexPath).href;
+const indexPath = path.resolve(__dirname, 'app', 'index.html');
+const samePath = process.platform === 'win32' ? (a, b) => a.toLowerCase() === b.toLowerCase() : (a, b) => a === b;
+// Compare file paths, not URL strings: Chromium and pathToFileURL escape characters such as ~ % [ ] differently,
+// and Windows extracts the portable build under %TEMP%, which is often an 8.3 path like C:\Users\ADMINI~1.
+function isTrustedPage(url) {
+  try { return url.startsWith('file:') && samePath(path.resolve(fileURLToPath(url)), indexPath); } catch { return false; }
+}
+// Only `electron .` sets defaultApp. Unlike app.isPackaged it does not depend on the executable's name, and the
+// OnlyLoadAppFromAsar fuse keeps a renamed packaged build from loading Electron's default app.
+const developing = process.defaultApp === true;
 let mainWindow, session, accepting = false, epoch = 0, timer, queue = Promise.resolve();
 let failures = 0, retryAt = 0, quitting = false;
 const enqueue = fn => { const next = queue.then(fn); queue = next.catch(() => {}); return next; };
 const file = () => path.join(app.getPath('userData'), 'diary-vault.bin');
 function trusted(event) {
-  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame || event.senderFrame.url !== trustedPage) throw Error('不允許的儲存請求。');
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame || !isTrustedPage(event.senderFrame.url)) throw Error('不允許的儲存請求。');
 }
 function clearKey() { session?.key.fill(0); session = null; }
 function lock() {
@@ -33,7 +41,8 @@ ipcMain.handle('diary:unlock', (event, password, legacyText) => {
   const requestedEpoch = epoch;
   return enqueue(async () => {
     if (requestedEpoch !== epoch || !mainWindow?.isFocused()) throw Error('視窗已鎖定，請重新解鎖。');
-    if (Date.now() < retryAt) throw Error('嘗試過於頻繁，請稍後再試（最長 30 秒）。');
+    // Checked before the try below, so retrying during the wait does not lengthen it.
+    if (Date.now() < retryAt) throw Error(`嘗試過於頻繁，請在 ${Math.ceil((retryAt - Date.now()) / 1000)} 秒後再試。`);
     if (session) throw Error('請先鎖定日記。');
     let candidate;
     try {
@@ -86,17 +95,25 @@ ipcMain.handle('diary:lock', event => { trusted(event); return lock(); });
 ipcMain.on('diary:activity', event => { trusted(event); activity(); });
 function createWindow() {
   mainWindow = new BrowserWindow({ width: 1100, height: 760, minWidth: 720, minHeight: 520, title: '日記', backgroundColor: '#fffaf0', autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, 'preload.js') } });
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: developing, preload: path.join(__dirname, 'preload.js') } });
+  // Electron grants web permissions by default; the diary needs none (camera, microphone, notifications, devices, …).
+  const browserSession = mainWindow.webContents.session;
+  browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  browserSession.setPermissionCheckHandler(() => false);
+  browserSession.setDevicePermissionHandler(() => false);
   Menu.setApplicationMenu(null);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-navigate', (event, url) => { if (url !== trustedPage) event.preventDefault(); });
+  mainWindow.webContents.on('will-navigate', (event, url) => { if (!isTrustedPage(url)) event.preventDefault(); });
   mainWindow.webContents.on('did-start-loading', () => { void lock(); });
   mainWindow.webContents.on('render-process-gone', () => { void lock(); });
   mainWindow.on('blur', () => { void lock(); });
   mainWindow.on('closed', () => { mainWindow = null; void lock(); });
-  mainWindow.loadFile(indexPath);
+  // loadFile builds its URL without escaping '%', which would leave an undecodable URL for isTrustedPage.
+  mainWindow.loadURL(pathToFileURL(indexPath).href);
 }
-if (!app.requestSingleInstanceLock()) { app.quit(); }
+// Fuses disable Node's --inspect; Chromium's remote debugging would still expose the unlocked page.
+if (!developing && ['remote-debugging-port', 'remote-debugging-pipe'].some(name => app.commandLine.hasSwitch(name))) { app.exit(1); }
+else if (!app.requestSingleInstanceLock()) { app.quit(); }
 else {
   app.whenReady().then(() => {
     powerMonitor.on('lock-screen', () => { void lock(); });

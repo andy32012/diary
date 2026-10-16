@@ -16,6 +16,18 @@ let setupRequired = false;
 let legacyLocal = false;
 let viewEpoch = 0;
 let unlocking = false;
+// Shown on the lock screen until the next unlock attempt; locking re-renders the gate right after an error.
+let gateError = '', gateErrorUntil = Infinity;
+function rememberGateError(text) {
+  gateError = text;
+  // A throttle message counts down; once its wait is over it no longer applies.
+  const wait = /請在 (\d+) 秒後再試/.exec(text);
+  gateErrorUntil = wait ? Date.now() + Number(wait[1]) * 1000 : Infinity;
+}
+// Card ids of the last list render; the entrance animation plays only when this changes.
+let shownIds = '';
+// Electron prefixes rejected invoke() errors with "Error invoking remote method '…': Error: ".
+const errorText = error => String(error?.message || error || '').replace(/^Error invoking remote method '[^']+': (?:\w*Error: )?/, '');
 
 function readLegacyArray(key) {
   const raw = localStorage.getItem(key);
@@ -24,11 +36,36 @@ function readLegacyArray(key) {
   if (!Array.isArray(value)) throw new Error('舊日記資料格式錯誤。');
   return value;
 }
+let pendingConfirm = null;
+function settleConfirm(ok) {
+  const resolve = pendingConfirm; pendingConfirm = null;
+  if ($('confirmDialog').open) $('confirmDialog').close();
+  resolve?.(ok);
+}
+// In-page dialog: a native confirm() takes focus from the window, and losing focus locks the diary.
+function confirmAction(message) {
+  settleConfirm(false);
+  $('confirmMessage').textContent = message;
+  $('confirmDialog').showModal();
+  return new Promise(resolve => { pendingConfirm = resolve; });
+}
+$('confirmOk').onclick = () => settleConfirm(true);
+$('confirmCancel').onclick = () => settleConfirm(false);
+// A modal dialog does not trap Tab; leaving its last button hands focus to the window frame, which fires 'blur' and locks.
+$('confirmDialog').addEventListener('keydown', ev => {
+  if (ev.key !== 'Tab') return;
+  ev.preventDefault();
+  const cancel = $('confirmCancel'), ok = $('confirmOk'), current = document.activeElement;
+  (current === cancel ? ok : current === ok ? cancel : ev.shiftKey ? ok : cancel).focus();
+});
+// Esc closes the dialog without a button; a newer dialog may already be open by the time this fires.
+$('confirmDialog').addEventListener('close', () => { if (!$('confirmDialog').open) settleConfirm(false); });
 function clearPrivateView() {
   storageReady = false;
   viewEpoch++;
-  entries = []; weights = []; selectedId = null;
-  for (const id of ['body', 'search', 'wKg', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
+  settleConfirm(false);
+  entries = []; weights = []; selectedId = null; shownIds = '';
+  for (const id of ['body', 'search', 'wKg', 'wDate', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
   for (const id of ['cards', 'grid', 'wList', 'wStats', 'chart', 'edDate', 'count']) $(id).replaceChildren();
   $('editor').classList.add('hidden');
   $('secureGate').classList.remove('hidden');
@@ -38,8 +75,9 @@ function clearPrivateView() {
   document.querySelector('.detail').style.background = '';
 }
 function showStorageFailure(error) {
+  rememberGateError(`無法安全開啟或儲存：${errorText(error) || '請稍後再試。'}`);
   clearPrivateView();
-  $('secureGateMessage').textContent = `無法安全開啟或儲存：${error?.message || '請稍後再試。'}`;
+  $('secureGateMessage').textContent = gateError;
   void window.diaryCrypto.lock();
 }
 function save() {
@@ -55,9 +93,9 @@ async function refreshGate() {
   $('confirmLabel').classList.toggle('hidden', !setupRequired);
   $('vaultSubmit').textContent = setupRequired ? '建立密碼並加密' : '解鎖';
   $('vaultPassword').autocomplete = setupRequired ? 'new-password' : 'current-password';
-  $('secureGateMessage').textContent = setupRequired
+  $('secureGateMessage').textContent = (Date.now() < gateErrorUntil && gateError) || (setupRequired
     ? '設定至少 12 個字元的長密碼。舊日記將遷移至密碼加密。'
-    : '日記已鎖定，請輸入獨立日記密碼。';
+    : '日記已鎖定，請輸入獨立日記密碼。');
 }
 $('vaultForm').addEventListener('submit', async event => {
   event.preventDefault();
@@ -68,7 +106,7 @@ $('vaultForm').addEventListener('submit', async event => {
     return;
   }
   const attempt = viewEpoch;
-  unlocking = true; $('vaultSubmit').disabled = true;
+  unlocking = true; $('vaultSubmit').disabled = true; gateError = '';
   $('secureGateMessage').textContent = '正在安全解鎖，請稍候…';
   $('vaultPassword').value = ''; $('vaultConfirm').value = '';
   try {
@@ -86,9 +124,10 @@ $('vaultForm').addEventListener('submit', async event => {
     document.querySelector('aside').inert = false;
   } catch (error) {
     if (attempt === viewEpoch) {
+      rememberGateError(errorText(error) || '解鎖失敗，請再試一次。');
       clearPrivateView();
+      $('secureGateMessage').textContent = gateError;
       await window.diaryCrypto.lock();
-      $('secureGateMessage').textContent = error.message;
     }
   } finally {
     password = null; unlocking = false; $('vaultSubmit').disabled = false;
@@ -96,7 +135,7 @@ $('vaultForm').addEventListener('submit', async event => {
 });
 window.diaryCrypto.onLocked(() => {
   clearPrivateView();
-  refreshGate().catch(error => { $('secureGateMessage').textContent = error.message; });
+  refreshGate().catch(error => { $('secureGateMessage').textContent = errorText(error); });
 });
 $('lockDiary').onclick = () => { clearPrivateView(); void window.diaryCrypto.lock(); };
 let lastActivity = 0;
@@ -132,34 +171,76 @@ function visibleEntries() {
   return q ? sorted.filter(e => e.body.toLowerCase().includes(q)) : sorted;
 }
 
+// Cards show at most three lines, so long bodies need not be in the DOM. Collapse whitespace first, as the page
+// would, so a body that starts with blank lines still fills its preview, and never end on half a surrogate pair.
+const preview = e => isBlank(e) ? '（新的日記）' : e.body.slice(0, 4000).replace(/\s+/g, ' ').trim().slice(0, 400).replace(/[\uD800-\uDBFF]$/, '');
+const cardFor = id => $('cards').querySelector(`.card[data-id="${id}"]`);
+// Cards currently in view, top to bottom, with their distance from the top of the visible area. Uses layout
+// offsets (#cards is their offsetParent) because the entrance animation's scale skews getBoundingClientRect.
+function cardsInView(box) {
+  const top = box.scrollTop, bottom = top + box.clientHeight, cards = box.children;
+  let lo = 0, hi = cards.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cards[mid].offsetTop + cards[mid].offsetHeight <= top) lo = mid + 1; else hi = mid; }
+  const found = [];
+  for (let i = lo; i < cards.length && cards[i].offsetTop < bottom; i++) {
+    if (cards[i].dataset.id) found.push({ id: cards[i].dataset.id, offset: cards[i].offsetTop - top });
+  }
+  return found;
+}
+
 function renderCards() {
   const list = visibleEntries();
-  $('cards').innerHTML = list.length
+  const ids = list.map(e => e.id).join();
+  const box = $('cards');
+  // New cards forget the heights content-visibility had measured, so a rebuild while scrolled would make the list
+  // jump. Keep the first card that is still in view after the rebuild where it was.
+  const anchors = box.scrollTop > 0 ? cardsInView(box) : [];
+  box.classList.toggle('settled', ids === shownIds);
+  shownIds = ids;
+  box.innerHTML = list.length
     ? list.map((e, i) => `
       <div class="card ${e.id === selectedId ? 'sel' : ''}" data-id="${e.id}"
-           style="box-shadow:0 5px 14px ${COLORS[e.mood - 1]}aa;animation-delay:${i * 0.06}s">
+           style="box-shadow:0 5px 14px ${COLORS[e.mood - 1]}aa;animation-delay:${Math.min(i, 10) * 0.06}s">
         <div class="face" style="background:${COLORS[e.mood - 1]};animation-delay:${i * 0.4}s">${EMOJI[e.mood - 1]}</div>
-        <div><div class="date">${fmtShort(e.date)}</div><div class="txt">${isBlank(e) ? '（新的日記）' : esc(e.body)}</div></div>
+        <div><div class="date">${fmtShort(e.date)}</div><div class="txt">${esc(preview(e))}</div></div>
       </div>`).join('')
     : `<div class="empty">${MASCOT(mode === 'list' ? '' : 'small')}<p>${mode === 'list' ? '還沒有日記喔<br>點右下角的筆寫下今天吧 ✎' : '這天沒有寫日記'}</p></div>`;
+  for (const anchor of anchors) {
+    const card = cardFor(anchor.id);
+    if (card) { box.scrollTop = card.offsetTop - anchor.offset; break; }
+  }
+}
+// Rebuilding every card took seconds per keystroke in long diaries; edits update only their own card.
+function updateCard(e) {
+  const card = cardFor(e.id);
+  if (!card) return;
+  card.style.boxShadow = `0 5px 14px ${COLORS[e.mood - 1]}aa`;
+  const face = card.querySelector('.face');
+  face.style.background = COLORS[e.mood - 1]; face.textContent = EMOJI[e.mood - 1];
+  card.querySelector('.txt').textContent = preview(e);
+}
+function markSelected() {
+  $('cards').querySelector('.card.sel')?.classList.remove('sel');
+  if (selectedId !== null) cardFor(selectedId)?.classList.add('sel');
 }
 
 $('cards').addEventListener('click', ev => {
   const card = ev.target.closest('.card');
   if (card) select(Number(card.dataset.id));
 });
-$('cards').addEventListener('contextmenu', ev => {
+$('cards').addEventListener('contextmenu', async ev => {
   const card = ev.target.closest('.card');
-  const attempt = viewEpoch;
-  if (!card || !confirm('要刪除這篇日記嗎？') || !storageReady || attempt !== viewEpoch) return;
+  if (!card || !storageReady) return;
   ev.preventDefault();
-  const id = Number(card.dataset.id);
+  const attempt = viewEpoch, id = Number(card.dataset.id);
+  if (!await confirmAction('要刪除這篇日記嗎？') || !storageReady || attempt !== viewEpoch) return;
   card.classList.add('leaving');
   setTimeout(() => {
     if (!storageReady || attempt !== viewEpoch) return;
     entries = entries.filter(e => e.id !== id);
     save();
-    if (selectedId === id) select(null); else renderAll();
+    if (selectedId === id) select(null);
+    renderAll();
   }, 340);
 });
 $('search').addEventListener('input', renderCards);
@@ -238,11 +319,12 @@ $('wSave').onclick = () => {
 };
 $('wKg').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('wSave').click(); });
 
-$('wList').addEventListener('click', ev => {
+$('wList').addEventListener('click', async ev => {
   const del = ev.target.closest('.del');
-  const attempt = viewEpoch;
-  if (!del || !confirm('要刪除這筆體重嗎？') || !storageReady || attempt !== viewEpoch) return;
-  weights = weights.filter(w => w.date !== del.dataset.date);
+  if (!del || !storageReady) return;
+  const attempt = viewEpoch, date = del.dataset.date;
+  if (!await confirmAction('要刪除這筆體重嗎？') || !storageReady || attempt !== viewEpoch) return;
+  weights = weights.filter(w => w.date !== date);
   saveWeights(); renderWeights();
 });
 
@@ -343,25 +425,30 @@ $('moods').addEventListener('click', ev => {
   if (b) setMood(Number(b.dataset.m));
 });
 
-function setMood(m) {
-  if (!storageReady) return;
-  const e = selected();
-  if (!e) return;
-  e.mood = m;
+function showMood(m) {
   document.querySelectorAll('.mood').forEach((b, i) => {
     b.classList.toggle('on', i === m - 1);
     b.querySelector('.e').style.background = i === m - 1 ? COLORS[i] : 'transparent';
   });
   document.querySelector('.detail').style.background = `linear-gradient(${COLORS[m - 1]}77, transparent 70%)`;
-  save(); renderCards();
+}
+
+function setMood(m) {
+  if (!storageReady) return;
+  const e = selected();
+  if (!e) return;
+  e.mood = m;
+  showMood(m);
+  save(); updateCard(e);
 }
 
 function select(id) {
   if (!storageReady) return;
   const prev = selected();
+  let removed = false;
   if (prev && prev.id !== id && isBlank(prev)) {
     entries = entries.filter(e => e !== prev);
-    save();
+    save(); removed = true;
   }
   selectedId = id;
   const e = selected();
@@ -373,21 +460,26 @@ function select(id) {
     $('edDate').textContent = fmtLong(e.date);
     $('body').value = e.body;
     $('count').textContent = `${e.body.length} 字`;
-    setMood(e.mood);
+    showMood(e.mood);
     if (isBlank(e)) $('body').focus();
   } else {
     document.querySelector('.detail').style.background = '';
   }
-  renderAll();
+  // Selecting only moves the highlight; rebuild the list when a card was removed or is not shown yet.
+  if (removed || (e && !cardFor(e.id))) renderAll(); else markSelected();
 }
 
 $('body').addEventListener('input', () => {
   const e = selected();
   if (!storageReady || !e) return;
+  const wasBlank = isBlank(e);
   e.body = $('body').value;
   e.updated = new Date().toISOString();
   $('count').textContent = `${e.body.length} 字`;
-  save(); renderCards();
+  save();
+  // An edit can change which cards a search matches; otherwise only this card changes.
+  if (mode === 'list' && $('search').value.trim()) renderCards(); else updateCard(e);
+  if (mode === 'calendar' && wasBlank !== isBlank(e)) renderCal();
 });
 
 function addEntry() {
@@ -425,7 +517,7 @@ $('done').onclick = () => {
 };
 
 document.addEventListener('keydown', ev => {
-  if (!storageReady) return;
+  if (!storageReady || $('confirmDialog').open) return;
   if (ev.ctrlKey && ev.key.toLowerCase() === 'n') { ev.preventDefault(); addEntry(); }
   if (ev.ctrlKey && ev.key === 'Enter' && selected()) $('done').click();
 });
@@ -443,6 +535,6 @@ for (let i = 0; i < 14; i++) {
   });
   $('bubbles').appendChild(b);
 }
-refreshGate().catch(error => { $('secureGateMessage').textContent = error.message; });
+refreshGate().catch(error => { $('secureGateMessage').textContent = errorText(error); });
 setTimeout(() => $('splash').classList.add('out'), 1600);
 

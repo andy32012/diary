@@ -4,7 +4,7 @@ import Foundation
 import Security
 
 enum DiaryCryptoError: LocalizedError {
-    case keychain(OSStatus), invalidKey, invalidCiphertext, invalidUTF8, locked, password, missingKey
+    case keychain(OSStatus), invalidKey, invalidCiphertext, invalidUTF8, locked, password, missingKey, unreadableRecord
     var errorDescription: String? {
         switch self {
         case .keychain(let status): "無法讀取安全金鑰（\(status)）。"
@@ -14,6 +14,7 @@ enum DiaryCryptoError: LocalizedError {
         case .locked: "日記已鎖定。"
         case .password: "請使用至少 12 個字元的長密碼，最多 1024 UTF-8 位元組。"
         case .missingKey: "找不到舊日記金鑰。已停止遷移，原始資料仍保留。"
+        case .unreadableRecord: "密碼正確，但有記錄無法解密，已停止解鎖，日記記錄沒有被修改。若曾還原備份，請確認還原的是同一份完整的 App 備份。"
         }
     }
 }

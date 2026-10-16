@@ -18,6 +18,8 @@ struct DiaryApp: App {
                 }
             }
             .tint(Theme.pinkDeep)
+            // Theme is a fixed light palette; in Dark Mode system text turned white on the white editor card.
+            .preferredColorScheme(.light)
             .task {
                 try? await Task.sleep(for: .seconds(1.6))
                 withAnimation(.easeInOut(duration: 0.5)) { showSplash = false }
@@ -148,16 +150,25 @@ private struct EncryptionGate: View {
     }
     private func migrate() throws {
         // Stage and validate everything before modifying SwiftData objects.
-        let stagedEntries = try entries.map { entry -> (Entry, Data, Data) in
-            let body = try entry.encryptedBody.map { try DiaryCrypto.decrypt($0) } ?? entry.body
-            let moodText = try entry.encryptedMood.map { try DiaryCrypto.decrypt($0) } ?? String(entry.mood)
-            guard let mood = Int(moodText), (1...5).contains(mood) else { throw DiaryCryptoError.invalidCiphertext }
-            return (entry, try DiaryCrypto.encrypt(body), try DiaryCrypto.encrypt(String(mood)))
-        }
-        let stagedWeights = try weights.map { record -> (WeightRecord, Data) in
-            let text = try record.encryptedKg.map { try DiaryCrypto.decrypt($0) } ?? String(record.kg)
-            guard let value = Double(text), value.isFinite, (20...300).contains(value) else { throw DiaryCryptoError.invalidCiphertext }
-            return (record, try DiaryCrypto.encrypt(String(value)))
+        let stagedEntries: [(Entry, Data, Data)]
+        let stagedWeights: [(WeightRecord, Data)]
+        do {
+            stagedEntries = try entries.map { entry -> (Entry, Data, Data) in
+                let body = try entry.encryptedBody.map { try DiaryCrypto.decrypt($0) } ?? entry.body
+                let moodText = try entry.encryptedMood.map { try DiaryCrypto.decrypt($0) } ?? String(entry.mood)
+                guard let mood = Int(moodText), (1...5).contains(mood) else { throw DiaryCryptoError.invalidCiphertext }
+                return (entry, try DiaryCrypto.encrypt(body), try DiaryCrypto.encrypt(String(mood)))
+            }
+            stagedWeights = try weights.map { record -> (WeightRecord, Data) in
+                let text = try record.encryptedKg.map { try DiaryCrypto.decrypt($0) } ?? String(record.kg)
+                guard let value = Double(text), value.isFinite, (20...300).contains(value) else { throw DiaryCryptoError.invalidCiphertext }
+                return (record, try DiaryCrypto.encrypt(String(value)))
+            }
+        } catch DiaryCryptoError.locked {
+            throw DiaryCryptoError.locked
+        } catch {
+            // The password already unwrapped the key, so this is a damaged or mismatched record, not a wrong password.
+            throw DiaryCryptoError.unreadableRecord
         }
         let autosave = context.autosaveEnabled
         context.autosaveEnabled = false
