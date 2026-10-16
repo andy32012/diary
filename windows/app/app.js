@@ -269,8 +269,9 @@ $('grid').addEventListener('click', ev => {
   selDay = new Date(calMonth.getFullYear(), calMonth.getMonth(), Number(d));
   renderCal(); renderCards();
 });
-$('prev').onclick = () => { calMonth.setMonth(calMonth.getMonth() - 1); renderCal(); };
-$('next').onclick = () => { calMonth.setMonth(calMonth.getMonth() + 1); renderCal(); };
+// Pin to day 1: setMonth on the 29th–31st overflows into the following month.
+$('prev').onclick = () => { calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1); renderCal(); };
+$('next').onclick = () => { calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1); renderCal(); };
 
 document.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
   mode = b.dataset.mode;

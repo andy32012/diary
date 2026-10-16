@@ -484,3 +484,41 @@ test('adding shows the new card, selecting moves the highlight, deleting the sel
   assert.deepEqual(shown(), ['2']);
   assert.deepEqual(saves.at(-1).entries.map(e => e.id), [2]);
 });
+test('write() retries a transient rename lock and still replaces the file', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-retry-'));
+  const realRename = fs.rename;
+  let calls = 0;
+  fs.rename = async (...args) => { if (++calls < 3) throw Object.assign(Error('locked by scanner'), { code: 'EPERM' }); return realRename(...args); };
+  try {
+    const file = path.join(dir, 'vault');
+    await vault.write(file, Buffer.from('saved'));
+    assert.equal(calls, 3);
+    assert.equal((await vault.read(file)).toString(), 'saved');
+  } finally { fs.rename = realRename; await fs.rm(dir, { recursive: true, force: true }); }
+});
+test('only wrong passwords throttle unlock; focus-loss failures do not', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-backoff-'));
+  const h = await harness(dir);
+  try {
+    assert.equal(await h.call('unlock', password, plaintext), plaintext);
+    await h.call('lock');
+    h.win.focused = false;
+    await assert.rejects(h.call('unlock', password), /鎖定/);
+    h.win.focused = true;
+    assert.equal(await h.call('unlock', password), plaintext);
+    await h.call('lock');
+    await assert.rejects(h.call('unlock', 'the-wrong-password'), /密碼錯誤/);
+    await assert.rejects(h.call('unlock', password), /頻繁|秒後/);
+  } finally { await h.call('lock'); await fs.rm(dir, { recursive: true, force: true }); }
+});
+test('a burst of saves coalesces into one write and persists the latest text', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diary-coalesce-'));
+  const h = await harness(dir);
+  try {
+    await h.call('unlock', password, plaintext);
+    const texts = Array.from({ length: 12 }, (_, i) => plaintext.replace('私人的日記', `草稿 ${i}`));
+    await Promise.all(texts.map(text => h.call('save', text)));
+    await h.call('lock');
+    assert.equal(await h.call('unlock', password), texts.at(-1));
+  } finally { await h.call('lock'); await fs.rm(dir, { recursive: true, force: true }); }
+});
