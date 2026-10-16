@@ -28,7 +28,7 @@ function clearPrivateView() {
   storageReady = false;
   viewEpoch++;
   entries = []; weights = []; selectedId = null;
-  for (const id of ['body', 'search', 'wKg', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
+  for (const id of ['body', 'search', 'wKg', 'wDate', 'vaultPassword', 'vaultConfirm']) $(id).value = '';
   for (const id of ['cards', 'grid', 'wList', 'wStats', 'chart', 'edDate', 'count']) $(id).replaceChildren();
   $('editor').classList.add('hidden');
   $('secureGate').classList.remove('hidden');
@@ -78,7 +78,7 @@ $('vaultForm').addEventListener('submit', async event => {
     const data = JSON.parse(text);
     entries = data.entries; weights = data.weights;
     localStorage.removeItem(STORE); localStorage.removeItem(WSTORE);
-    storageReady = true;
+    storageReady = true; $('wDate').value = dayKey(new Date());
     renderAll(); if (mode === 'weight') renderWeights();
     $('secureGate').classList.add('hidden');
     $('lockDiary').classList.remove('hidden');
