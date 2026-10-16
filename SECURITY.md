@@ -82,5 +82,5 @@ npx @electron/fuses read --app "dist/win-unpacked/日記.exe"
    - 用開發版和 Xcode → Devices 的 Download／Replace Container，把資料庫和另一次獨立設定（另一台裝置，或重新安裝後）產生的 `diary-password-key-v2.json` 配對，並輸入該次設定的密碼。
    - 用除錯版改動某筆 `encryptedBody` 的一個 byte。
    放回成對的檔案後，應能正常解鎖。
-8. Windows：把 `dist/win-unpacked` 放到名稱含 `~`、`%`、`[ ]` 的資料夾（例如 `ADMINI~1`），應能正常設定密碼、解鎖與儲存。打錯密碼時鎖定畫面應顯示「密碼錯誤」，並在等待期間顯示剩餘秒數。
+8. Windows：把 `dist/win-unpacked` 放到名稱含 `~`、`%`、`[ ]` 的資料夾（例如 `ADMINI~1`），應能正常設定密碼、解鎖與儲存。打錯密碼時鎖定畫面應顯示「密碼錯誤」；連續打錯後立刻再按解鎖，應顯示「嘗試過於頻繁，請在 N 秒後再試。」，等待時間過後重新鎖定時不再顯示這段話。
 9. iPad：在深色模式（含「自動」切到深色的晚上）下，日記內文、月曆與鎖定畫面都應清楚可讀。

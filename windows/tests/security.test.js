@@ -181,13 +181,27 @@ test('backgrounding during expensive unlock does not restore a session', async (
     await assert.rejects(h.call('save', plaintext), /鎖定/);
   } finally { await h.call('lock'); await fs.rm(dir, { recursive: true, force: true }); }
 });
-async function renderer({ runTimers = false } = {}) {
+async function renderer({ runTimers = false, text = plaintext } = {}) {
   const elements = new Map(), events = new Map(), windowEvents = new Map(), saves = [];
+  const classList = () => {
+    const names = new Set();
+    return { add: name => names.add(name), remove: name => names.delete(name), contains: name => names.has(name),
+      toggle: (name, on = !names.has(name)) => (on ? names.add(name) : names.delete(name), on) };
+  };
+  const isCard = id => /^cards \.card\[data-id="\d+"\]$/.test(id);
   function element(id) {
     if (!elements.has(id)) elements.set(id, { id, value: '', textContent: '', innerHTML: '', disabled: false, open: false,
       // Descendant lookups return stable stubs keyed by selector, e.g. element('cards .card[data-id="1"] .txt').
-      querySelector(selector) { return element(`${this.id} ${selector}`); },
-      style: {}, dataset: {}, listeners: new Map(), classList: { add() {}, remove() {}, toggle() {} },
+      // In #cards, a card exists only while the last render contains it, and '.card.sel' finds the highlighted one.
+      querySelector(selector) {
+        if (this.id === 'cards') {
+          if (selector === '.card.sel') return [...elements.values()].find(el => isCard(el.id) && el.classList.contains('sel')) ?? null;
+          const card = /^\.card\[data-id="(\d+)"\]/.exec(selector);
+          if (card && !this.innerHTML.includes(`data-id="${card[1]}"`)) return null;
+        }
+        return element(`${this.id} ${selector}`);
+      },
+      style: {}, dataset: {}, listeners: new Map(), classList: classList(),
       addEventListener(type, cb) { this.listeners.set(type, cb); },
       appendChild() {}, replaceChildren() { this.textContent = ''; this.innerHTML = ''; },
       showModal() { if (this.open) throw Error('dialog already open'); this.open = true; },
@@ -195,6 +209,16 @@ async function renderer({ runTimers = false } = {}) {
       // Like HTMLDialogElement, the close event is dispatched after close() returns.
       close() { this.open = false; const cb = this.listeners.get('close'); if (cb) setImmediate(cb); },
     });
+    if (id === 'cards' && !Object.getOwnPropertyDescriptor(elements.get(id), 'innerHTML').set) {
+      let html = '';
+      Object.defineProperty(elements.get(id), 'innerHTML', { configurable: true, enumerable: true, get: () => html, set(value) {
+        html = value;
+        // A render replaces every card: only the one written as class="card sel" is highlighted afterwards.
+        for (const [key, card] of elements) {
+          if (isCard(key)) card.classList.toggle('sel', value.includes(`class="card sel" data-id="${/data-id="(\d+)"/.exec(key)[1]}"`));
+        }
+      } });
+    }
     return elements.get(id);
   }
   const state = { onLocked: null, resolveUnlock: null, rejectUnlock: null, saveError: null, lockCalls: 0 };
@@ -221,7 +245,7 @@ async function renderer({ runTimers = false } = {}) {
   async function unlock() {
     element('vaultPassword').value = password;
     const submit = element('vaultForm').listeners.get('submit')({ preventDefault() {} });
-    state.resolveUnlock(plaintext); await submit;
+    state.resolveUnlock(text); await submit;
   }
   return { element, document, events, windowEvents, saves, state, unlock };
 }
@@ -383,6 +407,18 @@ test('lock screen keeps the unlock or save error instead of the generic locked t
   await attempt; await settle();
   assert.equal(message(), '嘗試過於頻繁，請在 1 秒後再試。');
 
+  // The countdown is only true until the wait is over; a later lock shows the normal text again.
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  state.onLocked(); await settle();
+  assert.equal(message(), '日記已鎖定，請輸入獨立日記密碼。');
+
+  element('vaultPassword').value = 'not the right password';
+  attempt = submit();
+  state.rejectUnlock(new Error("Error invoking remote method 'diary:unlock': Error: 密碼錯誤或日記檔案已損壞。"));
+  await attempt; await settle();
+  await unlock();
+  state.onLocked(); await settle();   // a successful unlock clears the old error
+  assert.equal(message(), '日記已鎖定，請輸入獨立日記密碼。');
   await unlock();
   state.saveError = new Error("Error invoking remote method 'diary:save': Error: ENOSPC: no space left on device");
   element('cards').listeners.get('click')({ target: { closest: () => ({ dataset: { id: '1' } }) } });
@@ -410,10 +446,41 @@ test('typing, selecting and changing mood update cards in place instead of rebui
   assert.equal(rebuilds, 0);
   assert.equal(card(' .face').textContent, '😄'); assert.equal(saves.at(-1).entries[0].mood, 5);
   input('x'.repeat(5000));
-  assert.equal(card(' .txt').textContent.length, 200);   // the card only shows three lines
+  assert.equal(card(' .txt').textContent.length, 400);   // the card only shows three lines
   assert.equal(saves.at(-1).entries[0].body.length, 5000);
+  // Whitespace collapses as on the page, so leading blank lines do not leave the preview empty.
+  input(`${'\n'.repeat(210)}早安\n\n  今天  好熱`);
+  assert.equal(card(' .txt').textContent, '早安 今天 好熱');
+  input(`${'a'.repeat(399)}😀`);
+  assert.equal(card(' .txt').textContent, 'a'.repeat(399));   // no half of an emoji at the cut
   // With a search active an edit can change which cards match, so the list is rebuilt.
   element('search').value = 'x';
   input('x'.repeat(5001));
-  assert.equal(rebuilds, 1); assert.match(html, /x{200}/); assert.doesNotMatch(html, /x{201}/);
+  assert.equal(rebuilds, 1); assert.match(html, /x{400}/); assert.doesNotMatch(html, /x{401}/);
+});
+test('adding shows the new card, selecting moves the highlight, deleting the selected card removes it', async () => {
+  const two = JSON.stringify({ version: 1, weights: [], entries: [
+    { id: 1, date: '2026-10-13T12:00:00Z', mood: 3, body: '第一篇' }, { id: 2, date: '2026-10-14T12:00:00Z', mood: 4, body: '第二篇' }] });
+  const { element, events, saves, unlock } = await renderer({ runTimers: true, text: two });
+  await unlock();
+  const cards = element('cards');
+  const shown = () => [...cards.innerHTML.matchAll(/data-id="(\d+)"/g)].map(m => m[1]);
+  const highlighted = id => element(`cards .card[data-id="${id}"]`).classList.contains('sel');
+  const click = id => cards.listeners.get('click')({ target: { closest: () => ({ dataset: { id: String(id) } }) } });
+  assert.deepEqual(shown(), ['2', '1']);
+
+  click(1); assert.equal(highlighted(1), true);
+  click(2); assert.equal(highlighted(2), true); assert.equal(highlighted(1), false);
+
+  // Ctrl+N adds an entry whose card is not rendered yet, so the list is rebuilt to show it.
+  events.get('keydown')({ ctrlKey: true, key: 'n', preventDefault() {} });
+  assert.equal(shown().length, 3);
+  // Leaving the new entry blank and selecting another drops it from the list.
+  click(1);
+  assert.deepEqual(shown(), ['2', '1']); assert.equal(highlighted(1), true);
+
+  const rightClick = element('cards').listeners.get('contextmenu')({ target: { closest: () => ({ dataset: { id: '1' }, classList: { add() {} } }) }, preventDefault() {} });
+  element('confirmOk').onclick(); await rightClick; await settle();
+  assert.deepEqual(shown(), ['2']);
+  assert.deepEqual(saves.at(-1).entries.map(e => e.id), [2]);
 });

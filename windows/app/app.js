@@ -17,7 +17,13 @@ let legacyLocal = false;
 let viewEpoch = 0;
 let unlocking = false;
 // Shown on the lock screen until the next unlock attempt; locking re-renders the gate right after an error.
-let gateError = '';
+let gateError = '', gateErrorUntil = Infinity;
+function rememberGateError(text) {
+  gateError = text;
+  // A throttle message counts down; once its wait is over it no longer applies.
+  const wait = /請在 (\d+) 秒後再試/.exec(text);
+  gateErrorUntil = wait ? Date.now() + Number(wait[1]) * 1000 : Infinity;
+}
 // Card ids of the last list render; the entrance animation plays only when this changes.
 let shownIds = '';
 // Electron prefixes rejected invoke() errors with "Error invoking remote method '…': Error: ".
@@ -69,7 +75,7 @@ function clearPrivateView() {
   document.querySelector('.detail').style.background = '';
 }
 function showStorageFailure(error) {
-  gateError = `無法安全開啟或儲存：${errorText(error) || '請稍後再試。'}`;
+  rememberGateError(`無法安全開啟或儲存：${errorText(error) || '請稍後再試。'}`);
   clearPrivateView();
   $('secureGateMessage').textContent = gateError;
   void window.diaryCrypto.lock();
@@ -87,7 +93,7 @@ async function refreshGate() {
   $('confirmLabel').classList.toggle('hidden', !setupRequired);
   $('vaultSubmit').textContent = setupRequired ? '建立密碼並加密' : '解鎖';
   $('vaultPassword').autocomplete = setupRequired ? 'new-password' : 'current-password';
-  $('secureGateMessage').textContent = gateError || (setupRequired
+  $('secureGateMessage').textContent = (Date.now() < gateErrorUntil && gateError) || (setupRequired
     ? '設定至少 12 個字元的長密碼。舊日記將遷移至密碼加密。'
     : '日記已鎖定，請輸入獨立日記密碼。');
 }
@@ -118,7 +124,7 @@ $('vaultForm').addEventListener('submit', async event => {
     document.querySelector('aside').inert = false;
   } catch (error) {
     if (attempt === viewEpoch) {
-      gateError = errorText(error) || '解鎖失敗，請再試一次。';
+      rememberGateError(errorText(error) || '解鎖失敗，請再試一次。');
       clearPrivateView();
       $('secureGateMessage').textContent = gateError;
       await window.diaryCrypto.lock();
@@ -165,16 +171,33 @@ function visibleEntries() {
   return q ? sorted.filter(e => e.body.toLowerCase().includes(q)) : sorted;
 }
 
-// Cards show at most three lines, so long bodies need not be in the DOM.
-const preview = e => isBlank(e) ? '（新的日記）' : e.body.slice(0, 200);
+// Cards show at most three lines, so long bodies need not be in the DOM. Collapse whitespace first, as the page
+// would, so a body that starts with blank lines still fills its preview, and never end on half a surrogate pair.
+const preview = e => isBlank(e) ? '（新的日記）' : e.body.slice(0, 4000).replace(/\s+/g, ' ').trim().slice(0, 400).replace(/[\uD800-\uDBFF]$/, '');
 const cardFor = id => $('cards').querySelector(`.card[data-id="${id}"]`);
+// Cards currently in view, top to bottom, with their distance from the top of the visible area. Uses layout
+// offsets (#cards is their offsetParent) because the entrance animation's scale skews getBoundingClientRect.
+function cardsInView(box) {
+  const top = box.scrollTop, bottom = top + box.clientHeight, cards = box.children;
+  let lo = 0, hi = cards.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cards[mid].offsetTop + cards[mid].offsetHeight <= top) lo = mid + 1; else hi = mid; }
+  const found = [];
+  for (let i = lo; i < cards.length && cards[i].offsetTop < bottom; i++) {
+    if (cards[i].dataset.id) found.push({ id: cards[i].dataset.id, offset: cards[i].offsetTop - top });
+  }
+  return found;
+}
 
 function renderCards() {
   const list = visibleEntries();
   const ids = list.map(e => e.id).join();
-  $('cards').classList.toggle('settled', ids === shownIds);
+  const box = $('cards');
+  // New cards forget the heights content-visibility had measured, so a rebuild while scrolled would make the list
+  // jump. Keep the first card that is still in view after the rebuild where it was.
+  const anchors = box.scrollTop > 0 ? cardsInView(box) : [];
+  box.classList.toggle('settled', ids === shownIds);
   shownIds = ids;
-  $('cards').innerHTML = list.length
+  box.innerHTML = list.length
     ? list.map((e, i) => `
       <div class="card ${e.id === selectedId ? 'sel' : ''}" data-id="${e.id}"
            style="box-shadow:0 5px 14px ${COLORS[e.mood - 1]}aa;animation-delay:${Math.min(i, 10) * 0.06}s">
@@ -182,6 +205,10 @@ function renderCards() {
         <div><div class="date">${fmtShort(e.date)}</div><div class="txt">${esc(preview(e))}</div></div>
       </div>`).join('')
     : `<div class="empty">${MASCOT(mode === 'list' ? '' : 'small')}<p>${mode === 'list' ? '還沒有日記喔<br>點右下角的筆寫下今天吧 ✎' : '這天沒有寫日記'}</p></div>`;
+  for (const anchor of anchors) {
+    const card = cardFor(anchor.id);
+    if (card) { box.scrollTop = card.offsetTop - anchor.offset; break; }
+  }
 }
 // Rebuilding every card took seconds per keystroke in long diaries; edits update only their own card.
 function updateCard(e) {
